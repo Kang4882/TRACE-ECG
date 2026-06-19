@@ -1,0 +1,395 @@
+{
+  "created_at_utc": "2026-06-17T17:55:56.208946+00:00",
+  "metrics": [
+    {
+      "metric": "ADI",
+      "full_name": "Always-wrong Display Inconsistency",
+      "old_name": "Unstable-Wrong",
+      "definition": "Predictions differ across layouts and none of the layouts is correct."
+    },
+    {
+      "metric": "Acc",
+      "full_name": "Accuracy",
+      "old_name": null,
+      "definition": "Overall row-level or grouped-layout average accuracy, depending on evaluator."
+    },
+    {
+      "metric": "Acc_12R1C",
+      "full_name": "12R1C Layout Accuracy",
+      "old_name": null,
+      "definition": "Accuracy on the 12R1C ECG display layout."
+    },
+    {
+      "metric": "Acc_3R4C",
+      "full_name": "3R4C Layout Accuracy",
+      "old_name": null,
+      "definition": "Accuracy on the 3R4C ECG display layout."
+    },
+    {
+      "metric": "Acc_6R2C",
+      "full_name": "6R2C Layout Accuracy",
+      "old_name": null,
+      "definition": "Accuracy on the 6R2C ECG display layout."
+    },
+    {
+      "metric": "Accuracy_12R1C",
+      "full_name": "12R1C Layout Accuracy",
+      "old_name": null,
+      "definition": "Accuracy on the 12R1C ECG display layout."
+    },
+    {
+      "metric": "Accuracy_3R4C",
+      "full_name": "3R4C Layout Accuracy",
+      "old_name": null,
+      "definition": "Accuracy on the 3R4C ECG display layout."
+    },
+    {
+      "metric": "Accuracy_6R2C",
+      "full_name": "6R2C Layout Accuracy",
+      "old_name": null,
+      "definition": "Accuracy on the 6R2C ECG display layout."
+    },
+    {
+      "metric": "BalAcc_12R1C",
+      "full_name": "12R1C Layout Balanced Accuracy",
+      "old_name": null,
+      "definition": "Balanced accuracy on the 12R1C ECG display layout."
+    },
+    {
+      "metric": "BalAcc_3R4C",
+      "full_name": "3R4C Layout Balanced Accuracy",
+      "old_name": null,
+      "definition": "Balanced accuracy on the 3R4C ECG display layout."
+    },
+    {
+      "metric": "BalAcc_6R2C",
+      "full_name": "6R2C Layout Balanced Accuracy",
+      "old_name": null,
+      "definition": "Balanced accuracy on the 6R2C ECG display layout."
+    },
+    {
+      "metric": "CDI",
+      "full_name": "Correctable Display Inconsistency",
+      "old_name": "Recoverable Flip",
+      "definition": "Predictions differ across layouts and at least one layout is correct."
+    },
+    {
+      "metric": "DCC",
+      "full_name": "Display-Consistent Correct",
+      "old_name": "Stable-Correct",
+      "definition": "All layouts give the same prediction and that prediction is correct."
+    },
+    {
+      "metric": "DCE",
+      "full_name": "Display-Consistent Error",
+      "old_name": "Stable-Wrong",
+      "definition": "All layouts give the same prediction but that prediction is wrong."
+    },
+    {
+      "metric": "DI",
+      "full_name": "Display Inconsistency",
+      "old_name": "Flip Rate",
+      "definition": "Fraction of valid grouped samples where predictions are not identical across layouts."
+    },
+    {
+      "metric": "Layout Agreement",
+      "full_name": "Layout Agreement",
+      "old_name": null,
+      "definition": "Fraction of valid groups where all layout predictions are identical; DCC + DCE."
+    },
+    {
+      "metric": "MacroF1_12R1C",
+      "full_name": "12R1C Layout Macro F1",
+      "old_name": null,
+      "definition": "Macro-F1 on the 12R1C ECG display layout."
+    },
+    {
+      "metric": "MacroF1_3R4C",
+      "full_name": "3R4C Layout Macro F1",
+      "old_name": null,
+      "definition": "Macro-F1 on the 3R4C ECG display layout."
+    },
+    {
+      "metric": "MacroF1_6R2C",
+      "full_name": "6R2C Layout Macro F1",
+      "old_name": null,
+      "definition": "Macro-F1 on the 6R2C ECG display layout."
+    },
+    {
+      "metric": "Oracle Acc",
+      "full_name": "Oracle-layout Accuracy",
+      "old_name": null,
+      "definition": "Grouped sample is correct if any layout prediction is correct."
+    },
+    {
+      "metric": "Oracle_Acc",
+      "full_name": "Oracle-layout Accuracy",
+      "old_name": null,
+      "definition": "Grouped sample is correct if any layout prediction is correct."
+    },
+    {
+      "metric": "Worst Acc",
+      "full_name": "Worst-layout Accuracy",
+      "old_name": null,
+      "definition": "Minimum layout-specific accuracy across 3R4C, 6R2C, and 12R1C."
+    },
+    {
+      "metric": "Worst_Acc",
+      "full_name": "Worst-layout Accuracy",
+      "old_name": null,
+      "definition": "Minimum layout-specific accuracy across 3R4C, 6R2C, and 12R1C."
+    },
+    {
+      "metric": "accuracy",
+      "full_name": "Accuracy",
+      "old_name": null,
+      "definition": "Overall accuracy reported by the evaluator."
+    },
+    {
+      "metric": "anchor_margin_chunk_bind_rows",
+      "full_name": "anchor_margin_chunk_bind_rows",
+      "old_name": null,
+      "definition": "Metric name preserved from source evaluator/log; no additional project-specific definition registered."
+    },
+    {
+      "metric": "balanced_accuracy",
+      "full_name": "Balanced Accuracy",
+      "old_name": null,
+      "definition": "Macro-average of per-class recall."
+    },
+    {
+      "metric": "bind_eligible_fraction",
+      "full_name": "bind_eligible_fraction",
+      "old_name": null,
+      "definition": "Metric name preserved from source evaluator/log; no additional project-specific definition registered."
+    },
+    {
+      "metric": "bind_eligible_rows",
+      "full_name": "bind_eligible_rows",
+      "old_name": null,
+      "definition": "Metric name preserved from source evaluator/log; no additional project-specific definition registered."
+    },
+    {
+      "metric": "code15_test_f1",
+      "full_name": "CODE-15 Test F1",
+      "old_name": null,
+      "definition": "F1 score on official ECG-Bench CODE-15 subset."
+    },
+    {
+      "metric": "completed_steps",
+      "full_name": "Completed Optimizer Steps",
+      "old_name": null,
+      "definition": "Training-log metadata, not an evaluation metric."
+    },
+    {
+      "metric": "consistent_correct",
+      "full_name": "consistent_correct",
+      "old_name": null,
+      "definition": "Metric name preserved from source evaluator/log; no additional project-specific definition registered."
+    },
+    {
+      "metric": "cpsc_test_f1",
+      "full_name": "CPSC Test F1",
+      "old_name": null,
+      "definition": "F1 score on official ECG-Bench CPSC subset."
+    },
+    {
+      "metric": "csn_test_acc",
+      "full_name": "CSN Test Accuracy",
+      "old_name": null,
+      "definition": "Accuracy on official ECG-Bench CSN subset."
+    },
+    {
+      "metric": "ecgqa_test_acc",
+      "full_name": "ECG-QA Test Accuracy",
+      "old_name": null,
+      "definition": "Accuracy on official ECG-Bench ECG-QA subset."
+    },
+    {
+      "metric": "effective_global_batch",
+      "full_name": "Effective Global Batch",
+      "old_name": null,
+      "definition": "Training-log metadata, not an evaluation metric."
+    },
+    {
+      "metric": "f1",
+      "full_name": "f1",
+      "old_name": null,
+      "definition": "Metric name preserved from source evaluator/log; no additional project-specific definition registered."
+    },
+    {
+      "metric": "fraction",
+      "full_name": "fraction",
+      "old_name": null,
+      "definition": "Metric name preserved from source evaluator/log; no additional project-specific definition registered."
+    },
+    {
+      "metric": "g12_test_acc",
+      "full_name": "G12EC Test Accuracy",
+      "old_name": null,
+      "definition": "Accuracy on official ECG-Bench G12EC subset."
+    },
+    {
+      "metric": "global_step",
+      "full_name": "global_step",
+      "old_name": null,
+      "definition": "Metric name preserved from source evaluator/log; no additional project-specific definition registered."
+    },
+    {
+      "metric": "gradient_accumulation_steps",
+      "full_name": "gradient_accumulation_steps",
+      "old_name": null,
+      "definition": "Metric name preserved from source evaluator/log; no additional project-specific definition registered."
+    },
+    {
+      "metric": "groups_valid",
+      "full_name": "Valid Layout Groups",
+      "old_name": null,
+      "definition": "Number of grouped samples with valid predictions for all layouts."
+    },
+    {
+      "metric": "layout_rows_per_group",
+      "full_name": "Layout Rows per Group",
+      "old_name": null,
+      "definition": "Training-log metadata, not an evaluation metric."
+    },
+    {
+      "metric": "macro_f1",
+      "full_name": "Macro F1",
+      "old_name": null,
+      "definition": "Unweighted average F1 across classes."
+    },
+    {
+      "metric": "mean",
+      "full_name": "Mean Score",
+      "old_name": null,
+      "definition": "Mean over reported broad ECG-Bench subset metrics."
+    },
+    {
+      "metric": "num_train_epochs",
+      "full_name": "Number of Training Epochs",
+      "old_name": null,
+      "definition": "Training-log metadata, not an evaluation metric."
+    },
+    {
+      "metric": "oracle",
+      "full_name": "Oracle-layout Accuracy",
+      "old_name": null,
+      "definition": "Grouped sample is correct if any layout prediction is correct."
+    },
+    {
+      "metric": "parse_rate",
+      "full_name": "Parse Success Rate",
+      "old_name": null,
+      "definition": "Fraction of predictions successfully parsed into a valid answer."
+    },
+    {
+      "metric": "parse_success",
+      "full_name": "parse_success",
+      "old_name": null,
+      "definition": "Metric name preserved from source evaluator/log; no additional project-specific definition registered."
+    },
+    {
+      "metric": "per_device_train_batch_size",
+      "full_name": "per_device_train_batch_size",
+      "old_name": null,
+      "definition": "Metric name preserved from source evaluator/log; no additional project-specific definition registered."
+    },
+    {
+      "metric": "ptb_test_f1",
+      "full_name": "PTB Test F1",
+      "old_name": null,
+      "definition": "F1 score on official ECG-Bench PTB subset."
+    },
+    {
+      "metric": "pure_lora_trainable_params",
+      "full_name": "Pure LoRA Trainable Parameters",
+      "old_name": null,
+      "definition": "Training-log metadata, not an evaluation metric."
+    },
+    {
+      "metric": "rows",
+      "full_name": "rows",
+      "old_name": null,
+      "definition": "Metric name preserved from source evaluator/log; no additional project-specific definition registered."
+    },
+    {
+      "metric": "rows_per_sec_effective",
+      "full_name": "rows_per_sec_effective",
+      "old_name": null,
+      "definition": "Metric name preserved from source evaluator/log; no additional project-specific definition registered."
+    },
+    {
+      "metric": "runtime_hr",
+      "full_name": "Training Runtime Hours",
+      "old_name": null,
+      "definition": "Training-log metadata, not an evaluation metric."
+    },
+    {
+      "metric": "samples_per_sec",
+      "full_name": "Samples per Second",
+      "old_name": null,
+      "definition": "Training-log metadata, not an evaluation metric."
+    },
+    {
+      "metric": "steps_per_sec",
+      "full_name": "Steps per Second",
+      "old_name": null,
+      "definition": "Training-log metadata, not an evaluation metric."
+    },
+    {
+      "metric": "total_params",
+      "full_name": "Total Parameters",
+      "old_name": null,
+      "definition": "Training-log metadata, not an evaluation metric."
+    },
+    {
+      "metric": "total_steps",
+      "full_name": "Total Optimizer Steps",
+      "old_name": null,
+      "definition": "Training-log metadata, not an evaluation metric."
+    },
+    {
+      "metric": "train_groups",
+      "full_name": "Training Groups",
+      "old_name": null,
+      "definition": "Training-log metadata, not an evaluation metric."
+    },
+    {
+      "metric": "train_loss",
+      "full_name": "Train Loss",
+      "old_name": null,
+      "definition": "Training-log metadata, not an evaluation metric."
+    },
+    {
+      "metric": "train_rows",
+      "full_name": "Training Rows",
+      "old_name": null,
+      "definition": "Training-log metadata, not an evaluation metric."
+    },
+    {
+      "metric": "trainable_percent",
+      "full_name": "Trainable Percent",
+      "old_name": null,
+      "definition": "Training-log metadata, not an evaluation metric."
+    },
+    {
+      "metric": "valid_groups",
+      "full_name": "Valid Layout Groups",
+      "old_name": null,
+      "definition": "Number of grouped samples with valid predictions for all layouts."
+    },
+    {
+      "metric": "world_size",
+      "full_name": "World Size",
+      "old_name": null,
+      "definition": "Training-log metadata, not an evaluation metric."
+    },
+    {
+      "metric": "worst_layout_accuracy",
+      "full_name": "worst_layout_accuracy",
+      "old_name": null,
+      "definition": "Metric name preserved from source evaluator/log; no additional project-specific definition registered."
+    }
+  ]
+}

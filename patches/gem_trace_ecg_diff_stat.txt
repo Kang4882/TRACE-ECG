@@ -1,0 +1,16 @@
+ README.md                                      |   22 +++
+ ecg_coca/open_clip/factory.py                  |    5 +-
+ ecg_coca/open_clip/openai.py                   |    5 +-
+ ecg_coca/training/file_utils.py                |    9 +-
+ llava/eval/model_ecg_distributed.py            |   94 +++++++---
+ llava/eval/model_ecg_resume.py                 |   49 +++--
+ llava/model/builder.py                         |   82 ++++++--
+ llava/model/llava_arch.py                      |   21 ++-
+ llava/model/multimodal_encoder/clip_encoder.py |   48 ++---
+ llava/train/llava_trainer.py                   | 1000 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ llava/train/train.py                           | 1145 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++--------
+ llava/train/train_mem.py                       |    2 +-
+ scripts/train_gem.sh                           |   20 +-
+ scripts/zero2.json                             |   11 +-
+ setup.sh                                       |  112 ++++++++++-
+ 15 files changed, 2416 insertions(+), 209 deletions(-)

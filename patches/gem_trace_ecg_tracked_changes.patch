@@ -1,0 +1,3198 @@
+diff --git a/README.md b/README.md
+index 1a68908..8d61f3f 100644
+--- a/README.md
++++ b/README.md
+@@ -59,6 +59,26 @@ We will continue to release more ECG-Grounding data and associated beat-level fe
+ ```shell
+ git clone https://github.com/lanxiang1017/GEM.git
+ bash GEM/setup.sh
++conda activate gem
++```
++
++The updated `setup.sh` is tuned for Blackwell workstations such as RTX PRO 6000:
++- it creates a dedicated conda env with Python 3.10
++- it installs CUDA 12.8 inside that env via the NVIDIA conda channel
++- it installs PyTorch 2.7.0 with the official `cu128` wheels
++- it defaults GEM to `sdpa` attention instead of `flash_attention_2`
++
++Why `sdpa` instead of FlashAttention-4? This repository is wired around `flash_attention_2` today, while FlashAttention-4 is a separate package/API. On Blackwell, `sdpa` with recent PyTorch is the lower-risk path for both training and inference. If you later want to benchmark a different backend, you can override it with `GEM_ATTN_IMPL`.
++
++Optional knobs:
++- `GEM_ENV_NAME=my-gem bash GEM/setup.sh`
++- `GEM_INSTALL_TRAIN_DEPS=0 bash GEM/setup.sh` for inference-only setup
++- `GEM_INSTALL_BITSANDBYTES=1 bash GEM/setup.sh` if you specifically need 4-bit/8-bit loading
++
++Recommended verification after activation:
++
++```shell
++python -c "import torch; print(torch.__version__, torch.version.cuda); print(torch.cuda.get_device_name(0)); print(torch.cuda.get_device_capability(0))"
+ ```
+ 
+ ## Data Preparation
+@@ -124,6 +144,8 @@ For training from scratch:
+   - step 1. specify paths in ```GEM/scripts/train_gem.sh```
+   - step 2. run ```bash GEM/scripts/train_gem.sh```
+ 
++By default the training code now resolves attention with `sdpa` on recent PyTorch builds. If you are on Ampere/Ada/Hopper and want to force another backend after installing it yourself, set `GEM_ATTN_IMPL` before launch, for example `GEM_ATTN_IMPL=flash_attention_2 bash GEM/scripts/train_gem.sh`.
++
+ ## Evaluation
+ 
+ For ECG-Grounding:
+diff --git a/ecg_coca/open_clip/factory.py b/ecg_coca/open_clip/factory.py
+index 61d0dae..06b9637 100644
+--- a/ecg_coca/open_clip/factory.py
++++ b/ecg_coca/open_clip/factory.py
+@@ -127,7 +127,10 @@ def get_tokenizer(
+ 
+ 
+ def load_state_dict(checkpoint_path: str, map_location='cpu'):
+-    checkpoint = torch.load(checkpoint_path, map_location=map_location)
++    try:
++        checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=False)
++    except TypeError:
++        checkpoint = torch.load(checkpoint_path, map_location=map_location)
+     if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+         state_dict = checkpoint['state_dict']
+     elif isinstance(checkpoint, torch.jit.ScriptModule):
+diff --git a/ecg_coca/open_clip/openai.py b/ecg_coca/open_clip/openai.py
+index 6c2c023..4960851 100644
+--- a/ecg_coca/open_clip/openai.py
++++ b/ecg_coca/open_clip/openai.py
+@@ -65,7 +65,10 @@ def load_openai_model(
+         state_dict = None
+     except RuntimeError:
+         # loading saved state dict
+-        state_dict = torch.load(model_path, map_location="cpu")
++        try:
++            state_dict = torch.load(model_path, map_location="cpu", weights_only=False)
++        except TypeError:
++            state_dict = torch.load(model_path, map_location="cpu")
+ 
+     # Build a non-jit model from the OpenAI jitted model state dict
+     cast_dtype = get_cast_dtype(precision)
+diff --git a/ecg_coca/training/file_utils.py b/ecg_coca/training/file_utils.py
+index 395cf7d..f060d9e 100644
+--- a/ecg_coca/training/file_utils.py
++++ b/ecg_coca/training/file_utils.py
+@@ -66,12 +66,19 @@ def pt_save(pt_obj, file_path):
+     with of as f:
+         torch.save(pt_obj, file_path)
+ 
++def torch_load_compat(file_or_path, map_location=None):
++    try:
++        return torch.load(file_or_path, map_location=map_location, weights_only=False)
++    except TypeError:
++        return torch.load(file_or_path, map_location=map_location)
++
++
+ def pt_load(file_path, map_location=None):
+     if file_path.startswith('s3'):
+         logging.info('Loading remote checkpoint, which may take a bit.')
+     of = fsspec.open(file_path, "rb")
+     with of as f:
+-        out = torch.load(f, map_location=map_location)
++        out = torch_load_compat(f, map_location=map_location)
+     return out
+ 
+ def check_exists(file_path):
+diff --git a/llava/eval/model_ecg_distributed.py b/llava/eval/model_ecg_distributed.py
+index c2ed02c..27a3e3c 100644
+--- a/llava/eval/model_ecg_distributed.py
++++ b/llava/eval/model_ecg_distributed.py
+@@ -12,11 +12,28 @@
+ from llava.model.builder import load_pretrained_model
+ from llava.utils import disable_torch_init
+ from llava.mm_utils import tokenizer_image_token, process_images, get_model_name_from_path
++from llava.jsonl_utils import iter_json_or_jsonl, row_metadata_for_output
+ import transformers
+ import re
+ from PIL import Image
+ import wfdb
+ 
++
++EVAL_METADATA_KEYS = [
++    "sample_id",
++    "benchmark_sample_id",
++    "group_key",
++    "signal_key",
++    "signal_path_key",
++    "layout_name",
++    "benchmark_subset",
++    "answer_type",
++    "task_type",
++    "ground_truth",
++    "labels_json",
++    "report_text",
++]
++
+ def split_list(lst, n):
+     """Split a list into n roughly equal chunks."""
+     chunk_size = math.ceil(len(lst) / n)
+@@ -85,7 +102,12 @@ def eval_model_chunk(args, questions_chunk, gpu_id, output_file):
+     disable_torch_init()
+     model_path = args.model_path
+     model_name = get_model_name_from_path(model_path)
+-    tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name)
++    tokenizer, model, image_processor, context_len = load_pretrained_model(
++        model_path,
++        args.model_base,
++        model_name,
++        lora_adapter_scale=args.lora_adapter_scale,
++    )
+     
+     all_answers = []
+     
+@@ -118,21 +140,29 @@ def eval_model_chunk(args, questions_chunk, gpu_id, output_file):
+         image = Image.open(image_path).convert('RGB')
+         image_tensor = process_images([image], image_processor, model.config)[0]
+         
+-        ecg_folder = args.ecg_folder
+-        ecg_path = os.path.join(ecg_folder, ecg_file)
+-        ecg = wfdb.rdsamp(ecg_path)[0]
+-        ecg[np.isnan(ecg)] = 0
+-        ecg[np.isinf(ecg)] = 0
+-        ecg = torch.Tensor(np.transpose(ecg, (1, 0)).astype(np.float32))
+-        c, length = ecg.shape
+-        seq_length = 5000
+-        if length < seq_length:
+-            new_ecg = torch.zeros((c, seq_length))
+-            new_ecg[:, 0:length] = ecg
+-            ecg = new_ecg
+-        elif length > seq_length:
+-            ecg = ecg[:, 0:seq_length]
+-        ecg = ecg.half()
++        ecg = None
++        if args.ecg_mode != "none":
++            ecg_folder = args.ecg_folder
++            ecg_path = os.path.join(ecg_folder, ecg_file)
++            ecg = wfdb.rdsamp(ecg_path)[0]
++            ecg[np.isnan(ecg)] = 0
++            ecg[np.isinf(ecg)] = 0
++            ecg = torch.Tensor(np.transpose(ecg, (1, 0)).astype(np.float32))
++            c, length = ecg.shape
++            seq_length = 5000
++            if length < seq_length:
++                new_ecg = torch.zeros((c, seq_length))
++                new_ecg[:, 0:length] = ecg
++                ecg = new_ecg
++            elif length > seq_length:
++                ecg = ecg[:, 0:seq_length]
++
++            if args.ecg_mode == "zero":
++                ecg = torch.zeros_like(ecg)
++            elif args.ecg_mode == "random":
++                ecg = torch.randn_like(ecg)
++
++            ecg = ecg.half()
+         
+         with torch.inference_mode():
+             output_ids = model.generate(
+@@ -158,7 +188,7 @@ def eval_model_chunk(args, questions_chunk, gpu_id, output_file):
+             "text": outputs,
+             "answer_id": ans_id,
+             "model_id": model_name,
+-            "metadata": {}
++            "metadata": line.get("metadata", {})
+         }
+         all_answers.append(new_answer)
+     
+@@ -196,22 +226,23 @@ def main():
+     parser.add_argument("--max_new_tokens", type=int, default=4096)
+     parser.add_argument("--ecg_tower", type=str, default="")
+     parser.add_argument("--open_clip_config", type=str, default="")
++    parser.add_argument("--ecg-mode", type=str, default="real", choices=["real", "none", "zero", "random"])
++    parser.add_argument("--lora-adapter-scale", type=float, default=1.0)
+     args = parser.parse_args()
+ 
+ 
+     questions = []
+-    with open(args.question_file, "r") as f:
+-        json_data = json.load(f)
+-        for line in json_data:
+-            # print(line)
+-            questions.append({"question_id": line["id"], 
+-                                "image": line["image"], 
+-                                "text": line["conversations"][0]["value"].replace("<image>\n",""),
+-                                "ans": line["conversations"][1]["value"],
+-                                "ecg": line["ecg"],
+-                                "conversations": line["conversations"],
+-                                },
+-                                )
++    for line in iter_json_or_jsonl(args.question_file):
++        metadata = row_metadata_for_output(line, EVAL_METADATA_KEYS)
++        questions.append({"question_id": line["id"],
++                          "image": line["image"],
++                          "text": line["conversations"][0]["value"].replace("<image>\n",""),
++                          "ans": line["conversations"][1]["value"],
++                          "ecg": line["ecg"],
++                          "conversations": line["conversations"],
++                          "metadata": metadata,
++                          },
++                         )
+     
+     num_gpus = torch.cuda.device_count()
+     if num_gpus < 1:
+@@ -219,9 +250,10 @@ def main():
+     
+     # divide questions into chunks, one for each GPU.
+     chunks = split_list(questions, num_gpus)
++    num_workers = len(chunks)
+     
+     processes = []
+-    for gpu_id in range(num_gpus):
++    for gpu_id in range(num_workers):
+         temp_file = f"answers_gpu{gpu_id}.jsonl"
+         p = mp.Process(target=eval_model_chunk, args=(args, chunks[gpu_id], gpu_id, temp_file))
+         p.start()
+@@ -231,7 +263,7 @@ def main():
+         p.join()
+     
+     # merge temporary answer files into the final answers file.
+-    merge_results(num_gpus, args.answers_file)
++    merge_results(num_workers, args.answers_file)
+ 
+ if __name__ == "__main__":
+     mp.set_start_method("spawn", force=True)
+diff --git a/llava/eval/model_ecg_resume.py b/llava/eval/model_ecg_resume.py
+index 4fe7bcb..8e14ffe 100644
+--- a/llava/eval/model_ecg_resume.py
++++ b/llava/eval/model_ecg_resume.py
+@@ -11,6 +11,7 @@
+ from llava.model.builder import load_pretrained_model
+ from llava.utils import disable_torch_init
+ from llava.mm_utils import tokenizer_image_token, process_images, get_model_name_from_path
++from llava.jsonl_utils import iter_json_or_jsonl, row_metadata_for_output
+ import transformers
+ from typing import Dict, Optional, Sequence, List
+ import re
+@@ -19,6 +20,22 @@
+ import math
+ 
+ 
++EVAL_METADATA_KEYS = [
++    "sample_id",
++    "benchmark_sample_id",
++    "group_key",
++    "signal_key",
++    "signal_path_key",
++    "layout_name",
++    "benchmark_subset",
++    "answer_type",
++    "task_type",
++    "ground_truth",
++    "labels_json",
++    "report_text",
++]
++
++
+ def split_list(lst, n):
+     """Split a list into n (roughly) equal-sized chunks"""
+     chunk_size = math.ceil(len(lst) / n)  # integer division
+@@ -88,20 +105,25 @@ def eval_model(args):
+     disable_torch_init()
+     model_path = args.model_path
+     model_name = get_model_name_from_path(model_path)
+-    tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name)
++    tokenizer, model, image_processor, context_len = load_pretrained_model(
++        model_path,
++        args.model_base,
++        model_name,
++        lora_adapter_scale=args.lora_adapter_scale,
++    )
+     
+     questions = []
+-    with open(args.question_file, "r") as f:
+-        json_data = json.load(f)
+-        for line in json_data:
+-            questions.append({"question_id": line["id"], 
+-                              "image": line["image"], 
+-                              "text": line["conversations"][0]["value"].replace("<image>\n",""),
+-                              "ans": line["conversations"][1]["value"],
+-                              "ecg": line["ecg"],
+-                              "conversations": line["conversations"],
+-                              },
+-                             )
++    for line in iter_json_or_jsonl(args.question_file):
++        metadata = row_metadata_for_output(line, EVAL_METADATA_KEYS)
++        questions.append({"question_id": line["id"],
++                          "image": line["image"],
++                          "text": line["conversations"][0]["value"].replace("<image>\n",""),
++                          "ans": line["conversations"][1]["value"],
++                          "ecg": line["ecg"],
++                          "conversations": line["conversations"],
++                          "metadata": metadata,
++                          },
++                         )
+ 
+     existing_question_ids = set()
+     
+@@ -184,7 +206,7 @@ def eval_model(args):
+             "text": outputs,
+             "answer_id": ans_id,
+             "model_id": model_name,
+-            "metadata": {}
++            "metadata": line.get("metadata", {})
+         }
+ 
+         output_file.write(json.dumps(new_answer) + "\n")
+@@ -209,6 +231,7 @@ def eval_model(args):
+     parser.add_argument("--max_new_tokens", type=int, default=1024)
+     parser.add_argument("--ecg_tower", type=str, default="")
+     parser.add_argument("--open_clip_config", type=str, default="")
++    parser.add_argument("--lora-adapter-scale", type=float, default=1.0)
+ 
+     args = parser.parse_args()
+ 
+diff --git a/llava/model/builder.py b/llava/model/builder.py
+index e1409d4..00736f1 100644
+--- a/llava/model/builder.py
++++ b/llava/model/builder.py
+@@ -23,7 +23,51 @@
+ from llava.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+ 
+ 
++def _tower_is_loaded(tower):
++    loaded = getattr(tower, "is_loaded", True)
++    return loaded() if callable(loaded) else bool(loaded)
++
++
++def _ensure_multimodal_towers_loaded(model, device_map):
++    ecg_tower = model.get_ecg_tower() if hasattr(model, "get_ecg_tower") else None
++    if ecg_tower is not None and not _tower_is_loaded(ecg_tower):
++        ecg_tower.load_model(device_map=device_map)
++    if ecg_tower is not None and device_map != 'auto':
++        ecg_tower.to(device=device_map, dtype=torch.float16)
++
++    vision_tower = model.get_vision_tower() if hasattr(model, "get_vision_tower") else None
++    if vision_tower is not None and not _tower_is_loaded(vision_tower):
++        vision_tower.load_model(device_map=device_map)
++    if vision_tower is not None and device_map != 'auto':
++        vision_tower.to(device=device_map, dtype=torch.float16)
++
++
++def _normalize_non_lora_key(key):
++    if key.startswith('base_model.'):
++        key = key[11:]
++    if key.startswith('model.model.'):
++        key = key[6:]
++    return key.replace('.base_layer.', '.')
++
++
++def _apply_lora_adapter_scale(model, scale):
++    if scale is None:
++        return
++    scale = float(scale)
++    if scale == 1.0:
++        return
++    scaled = 0
++    for module in model.modules():
++        scaling = getattr(module, "scaling", None)
++        if isinstance(scaling, dict):
++            for adapter_name in list(scaling.keys()):
++                scaling[adapter_name] = scaling[adapter_name] * scale
++                scaled += 1
++    print(f"Applied LoRA adapter scale={scale} to {scaled} adapter scaling entries before merge.")
++
++
+ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto", device="cuda", use_flash_attn=False, **kwargs):
++    lora_adapter_scale = kwargs.pop("lora_adapter_scale", None)
+     kwargs = {"device_map": device_map, **kwargs}
+ 
+     if device != "cuda":
+@@ -44,8 +88,11 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
+ 
+     if use_flash_attn:
+         kwargs['attn_implementation'] = 'flash_attention_2'
++    elif 'attn_implementation' not in kwargs and os.environ.get('GEM_ATTN_IMPL'):
++        kwargs['attn_implementation'] = os.environ['GEM_ATTN_IMPL']
+ 
+-    if 'llava' in model_name.lower() or "gem" in model_name.lower():
++    is_peft_adapter = os.path.exists(os.path.join(model_path, 'adapter_config.json'))
++    if 'llava' in model_name.lower() or "gem" in model_name.lower() or is_peft_adapter:
+         # Load LLaVA model
+         if 'lora' in model_name.lower() and model_base is None:
+             warnings.warn('There is `lora` in model name but no `model_base` is provided. If you are loading a LoRA model, please provide the `model_base` argument. Detailed instruction: https://github.com/haotian-liu/LLaVA#launch-a-model-worker-lora-weights-unmerged.')
+@@ -60,27 +107,20 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
+                 model.lm_head.weight = torch.nn.Parameter(torch.empty(token_num, tokem_dim, device=model.device, dtype=model.dtype))
+                 model.model.embed_tokens.weight = torch.nn.Parameter(torch.empty(token_num, tokem_dim, device=model.device, dtype=model.dtype))
+ 
++            _ensure_multimodal_towers_loaded(model, kwargs.get('device_map', device_map))
++
+             print('Loading additional LLaVA weights...')
+             if os.path.exists(os.path.join(model_path, 'non_lora_trainables.bin')):
+                 non_lora_trainables = torch.load(os.path.join(model_path, 'non_lora_trainables.bin'), map_location='cpu')
++                non_lora_trainables = {_normalize_non_lora_key(k): v for k, v in non_lora_trainables.items()}
++                model.load_state_dict(non_lora_trainables, strict=False)
+             else:
+-                # this is probably from HF Hub
+-                from huggingface_hub import hf_hub_download
+-                def load_from_hf(repo_id, filename, subfolder=None):
+-                    cache_file = hf_hub_download(
+-                        repo_id=repo_id,
+-                        filename=filename,
+-                        subfolder=subfolder)
+-                    return torch.load(cache_file, map_location='cpu')
+-                non_lora_trainables = load_from_hf(model_path, 'non_lora_trainables.bin')
+-            non_lora_trainables = {(k[11:] if k.startswith('base_model.') else k): v for k, v in non_lora_trainables.items()}
+-            if any(k.startswith('model.model.') for k in non_lora_trainables):
+-                non_lora_trainables = {(k[6:] if k.startswith('model.') else k): v for k, v in non_lora_trainables.items()}
+-            model.load_state_dict(non_lora_trainables, strict=False)
++                print('No non_lora_trainables.bin found; loading adapter weights only.')
+ 
+             from peft import PeftModel
+             print('Loading LoRA weights...')
+             model = PeftModel.from_pretrained(model, model_path)
++            _apply_lora_adapter_scale(model, lora_adapter_scale)
+             print('Merging LoRA weights...')
+             model = model.merge_and_unload()
+             print('Model is loaded...')
+@@ -115,6 +155,8 @@ def load_from_hf(repo_id, filename, subfolder=None):
+ 
+             elif "qwen" in model_name.lower() or "quyen" in model_name.lower():
+                 tokenizer = AutoTokenizer.from_pretrained(model_path)
++                kwargs.setdefault("attn_implementation", os.environ.get("GEM_ATTN_IMPL", "sdpa"))
++                overwrite_config = None
+                 if "moe" in model_name.lower() or "A14B" in model_name.lower():
+                     from llava.model.language_model.llava_qwen_moe import LlavaQwenMoeConfig
+                     if overwrite_config is not None:
+@@ -122,22 +164,21 @@ def load_from_hf(repo_id, filename, subfolder=None):
+                         rank0_print(f"Overwriting config with {overwrite_config}")
+                         for k, v in overwrite_config.items():
+                             setattr(llava_cfg, k, v)
+-                        model = LlavaQwenMoeForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, attn_implementation=attn_implementation, config=llava_cfg, **kwargs)
++                        model = LlavaQwenMoeForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, config=llava_cfg, **kwargs)
+                     else:
+-                        model = LlavaQwenMoeForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, attn_implementation=attn_implementation, **kwargs)
++                        model = LlavaQwenMoeForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
+ 
+                 else:
+                     from llava.model.language_model.llava_qwen import LlavaQwenConfig
+                     overwrite_config=None
+-                    attn_implementation="flash_attention_2"
+                     if overwrite_config is not None:
+                         llava_cfg = LlavaQwenConfig.from_pretrained(model_path)
+                         rank0_print(f"Overwriting config with {overwrite_config}")
+                         for k, v in overwrite_config.items():
+                             setattr(llava_cfg, k, v)
+-                        model = LlavaQwenForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, attn_implementation=attn_implementation, config=llava_cfg, **kwargs)
++                        model = LlavaQwenForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, config=llava_cfg, **kwargs)
+                     else:
+-                        model = LlavaQwenForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, attn_implementation=attn_implementation, **kwargs)
++                        model = LlavaQwenForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
+ 
+             elif "gem" in model_name.lower():
+                 tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
+@@ -162,6 +203,7 @@ def load_from_hf(repo_id, filename, subfolder=None):
+             model = AutoModelForCausalLM.from_pretrained(model_base, low_cpu_mem_usage=True, **kwargs)
+             print(f"Loading LoRA weights from {model_path}")
+             model = PeftModel.from_pretrained(model, model_path)
++            _apply_lora_adapter_scale(model, lora_adapter_scale)
+             print(f"Merging weights")
+             model = model.merge_and_unload()
+             print('Convert to FP16...')
+@@ -177,7 +219,7 @@ def load_from_hf(repo_id, filename, subfolder=None):
+ 
+     image_processor = None
+ 
+-    if 'llava' in model_name.lower() or 'gem' in model_name.lower():
++    if 'llava' in model_name.lower() or 'gem' in model_name.lower() or is_peft_adapter:
+         mm_use_im_start_end = getattr(model.config, "mm_use_im_start_end", False)
+         mm_use_im_patch_token = getattr(model.config, "mm_use_im_patch_token", True)
+         if mm_use_im_patch_token:
+diff --git a/llava/model/llava_arch.py b/llava/model/llava_arch.py
+index 8e64c4b..8ec0aaf 100644
+--- a/llava/model/llava_arch.py
++++ b/llava/model/llava_arch.py
+@@ -212,10 +212,11 @@ def prepare_inputs_labels_for_multimodal(
+         vision_tower = self.get_vision_tower()
+         if vision_tower is None or images is None or input_ids.shape[1] == 1:
+             return input_ids, position_ids, attention_mask, past_key_values, None, labels
+-        if ecgs.ndim == 2:  # if input shape is 12*5000
+-            ecgs = ecgs.unsqueeze(0)
+-
+-        ecg_features = self.encode_ecgs(ecgs)
++        ecg_features = None
++        if ecgs is not None:
++            if ecgs.ndim == 2:  # if input shape is 12*5000
++                ecgs = ecgs.unsqueeze(0)
++            ecg_features = self.encode_ecgs(ecgs)
+ 
+         if type(images) is list or images.ndim == 5:
+             if type(images) is list:
+@@ -270,9 +271,15 @@ def prepare_inputs_labels_for_multimodal(
+ 
+         #! if image was splited, the resulted image_features is a list: [(n_splits*n_patch, hidden_size)]
+         if type(image_features) is list:
+-            multimodal_features = [torch.cat([ecg_features[i].squeeze(0), image_features[i]], dim=0) for i in range(len(image_features))]
+-        else:    
+-            multimodal_features = torch.cat([ecg_features, image_features], dim=1)
++            if ecg_features is None:
++                multimodal_features = [image_features[i] for i in range(len(image_features))]
++            else:
++                multimodal_features = [torch.cat([ecg_features[i].squeeze(0), image_features[i]], dim=0) for i in range(len(image_features))]
++        else:
++            if ecg_features is None:
++                multimodal_features = image_features
++            else:
++                multimodal_features = torch.cat([ecg_features, image_features], dim=1)
+ 
+         # TODO: image start / end is not implemented here to support pretraining.
+         if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
+diff --git a/llava/model/multimodal_encoder/clip_encoder.py b/llava/model/multimodal_encoder/clip_encoder.py
+index d8c6ae8..a7bcaa7 100644
+--- a/llava/model/multimodal_encoder/clip_encoder.py
++++ b/llava/model/multimodal_encoder/clip_encoder.py
+@@ -40,10 +40,12 @@ def __init__(self, ecg_tower, args, delay_load=False):
+     def is_loaded(self):
+         return self.ecg_tower_is_loaded
+ 
+-    def load_model(self, model_name, device_map=None):
++    def load_model(self, model_name=None, device_map=None):
+         if self.ecg_tower_is_loaded:
+-            print('{} is already loaded, `load_model` called again, skipping.'.format(self.vision_tower_name))
++            print('{} is already loaded, `load_model` called again, skipping.'.format(self.ecg_tower_name))
+             return
++        if model_name is None:
++            model_name = self.model_name
+ 
+         self.ecg_tower, self.ecg_processor, self.model_config = get_ecg_encoder(model_name, checkpoint_path=self.ecg_tower_name, device='cpu')
+         self.ecg_tower.requires_grad_(False)
+@@ -51,19 +53,20 @@ def load_model(self, model_name, device_map=None):
+         self.ecg_tower_is_loaded = True
+         print("Loaded {} model".format(self.ecg_tower_name))
+ 
+-    @torch.no_grad()
+     def forward(self, ecgs):
+         self.device = self.ecg_tower.state_dict()['class_embedding'].device
+         self.dtype = self.ecg_tower.state_dict()['class_embedding'].dtype
+-        if type(ecgs) is list:
+-            ecg_features = []
+-            for ecg in ecgs:
+-                ecg_feature = self.ecg_tower(ecg.to(device=self.device, dtype=self.dtype).unsqueeze(0), output_last_transformer_layer=True)
+-                ecg_feature = ecg_feature.to(ecg.dtype)
+-                ecg_features.append(ecg_feature)
+-        else:
+-            ecg_features = self.ecg_tower(ecgs.to(device=self.device, dtype=self.dtype), output_last_transformer_layer=True)
+-            ecg_features = ecg_features.to(ecgs.dtype)
++        grad_enabled = torch.is_grad_enabled() and any(parameter.requires_grad for parameter in self.ecg_tower.parameters())
++        with torch.set_grad_enabled(grad_enabled):
++            if type(ecgs) is list:
++                ecg_features = []
++                for ecg in ecgs:
++                    ecg_feature = self.ecg_tower(ecg.to(device=self.device, dtype=self.dtype).unsqueeze(0), output_last_transformer_layer=True)
++                    ecg_feature = ecg_feature.to(ecg.dtype)
++                    ecg_features.append(ecg_feature)
++            else:
++                ecg_features = self.ecg_tower(ecgs.to(device=self.device, dtype=self.dtype), output_last_transformer_layer=True)
++                ecg_features = ecg_features.to(ecgs.dtype)
+ 
+         return ecg_features
+ 
+@@ -112,17 +115,18 @@ def feature_select(self, image_forward_outs):
+             raise ValueError(f'Unexpected select feature: {self.select_feature}')
+         return image_features
+ 
+-    @torch.no_grad()
+     def forward(self, images):
+-        if type(images) is list:
+-            image_features = []
+-            for image in images:
+-                image_forward_out = self.vision_tower(image.to(device=self.device, dtype=self.dtype).unsqueeze(0), output_hidden_states=True)
+-                image_feature = self.feature_select(image_forward_out).to(image.dtype)
+-                image_features.append(image_feature)
+-        else:
+-            image_forward_outs = self.vision_tower(images.to(device=self.device, dtype=self.dtype), output_hidden_states=True)
+-            image_features = self.feature_select(image_forward_outs).to(images.dtype)
++        grad_enabled = torch.is_grad_enabled() and any(parameter.requires_grad for parameter in self.vision_tower.parameters())
++        with torch.set_grad_enabled(grad_enabled):
++            if type(images) is list:
++                image_features = []
++                for image in images:
++                    image_forward_out = self.vision_tower(image.to(device=self.device, dtype=self.dtype).unsqueeze(0), output_hidden_states=True)
++                    image_feature = self.feature_select(image_forward_out).to(image.dtype)
++                    image_features.append(image_feature)
++            else:
++                image_forward_outs = self.vision_tower(images.to(device=self.device, dtype=self.dtype), output_hidden_states=True)
++                image_features = self.feature_select(image_forward_outs).to(images.dtype)
+ 
+         return image_features
+ 
+diff --git a/llava/train/llava_trainer.py b/llava/train/llava_trainer.py
+index ce2853a..d75d7a5 100644
+--- a/llava/train/llava_trainer.py
++++ b/llava/train/llava_trainer.py
+@@ -1,6 +1,8 @@
+ import os
++import time
+ import torch
+ import torch.nn as nn
++import torch.nn.functional as F
+ 
+ from torch.utils.data import Sampler
+ 
+@@ -14,6 +16,8 @@
+ )
+ from typing import List, Optional
+ 
++from llava.layoutbind_utils import compute_targetbind_margin_losses
++
+ 
+ def maybe_zero_3(param, ignore_status=False, name=None):
+     from deepspeed import zero
+@@ -132,6 +136,1002 @@ def __iter__(self):
+ 
+ class LLaVATrainer(Trainer):
+ 
++    def _triplet_data_args(self):
++        return getattr(self.train_dataset, "data_args", None)
++
++    def _triplet_world_size(self):
++        if torch.distributed.is_available() and torch.distributed.is_initialized():
++            return torch.distributed.get_world_size()
++        return 1
++
++    def _triplet_rank(self):
++        if torch.distributed.is_available() and torch.distributed.is_initialized():
++            return torch.distributed.get_rank()
++        return 0
++
++    def _triplet_reduce_mean(self, value: torch.Tensor) -> torch.Tensor:
++        if torch.distributed.is_available() and torch.distributed.is_initialized():
++            reduced = value.detach().clone()
++            torch.distributed.all_reduce(reduced, op=torch.distributed.ReduceOp.SUM)
++            reduced = reduced / torch.distributed.get_world_size()
++            return reduced
++        return value.detach()
++
++    def _triplet_reduce_sum_int(self, value: int, device: torch.device) -> int:
++        tensor = torch.tensor(float(value), device=device)
++        if torch.distributed.is_available() and torch.distributed.is_initialized():
++            torch.distributed.all_reduce(tensor, op=torch.distributed.ReduceOp.SUM)
++        return int(tensor.detach().cpu().item())
++
++    def _write_triplet_debug_row(
++        self,
++        *,
++        loss: torch.Tensor,
++        layout_losses: torch.Tensor,
++        triplet_num_groups: int,
++        triplet_group_size: int,
++        retention_num_samples: int = 0,
++        extra_metrics: Optional[dict] = None,
++    ) -> None:
++        csv_path = os.environ.get("TRIPLET_TRAIN_LOG_CSV")
++        if not csv_path:
++            return
++
++        # Keep debug logging non-collective. Calling all_reduce from compute_loss
++        # can deadlock when ZeRO/gradient-accumulation paths diverge in timing.
++        rank = self._triplet_rank()
++        if rank != 0:
++            root, ext = os.path.splitext(csv_path)
++            csv_path = f"{root}.rank{rank}{ext or '.csv'}"
++        global_groups = triplet_num_groups
++        global_layout_views = global_groups * triplet_group_size
++        global_retention_samples = retention_num_samples
++        reduced_loss = loss.detach().float().cpu()
++        reduced_layout_losses = layout_losses.detach().float().cpu()
++
++        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
++        if not hasattr(self, "_triplet_debug_start_time"):
++            self._triplet_debug_start_time = time.time()
++            self._triplet_debug_micro_step = 0
++            self._triplet_debug_group_presentations = 0
++            self._triplet_debug_layout_view_presentations = 0
++            self._triplet_debug_retention_presentations = 0
++
++        self._triplet_debug_micro_step += 1
++        self._triplet_debug_group_presentations += global_groups
++        self._triplet_debug_layout_view_presentations += global_layout_views
++        self._triplet_debug_retention_presentations += global_retention_samples
++
++        max_allocated_gb = torch.cuda.max_memory_allocated() / (1024 ** 3) if torch.cuda.is_available() else 0.0
++        reserved_gb = torch.cuda.memory_reserved() / (1024 ** 3) if torch.cuda.is_available() else 0.0
++        row = {
++            "time_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
++            "elapsed_sec": f"{time.time() - self._triplet_debug_start_time:.3f}",
++            "optimizer_step": int(self.state.global_step),
++            "micro_step": int(self._triplet_debug_micro_step),
++            "rank": rank,
++            "total_loss": f"{float(reduced_loss):.8f}",
++            "CE_3R4C": f"{float(reduced_layout_losses[0]):.8f}" if reduced_layout_losses.numel() > 0 else "",
++            "CE_6R2C": f"{float(reduced_layout_losses[1]):.8f}" if reduced_layout_losses.numel() > 1 else "",
++            "CE_12R1C": f"{float(reduced_layout_losses[2]):.8f}" if reduced_layout_losses.numel() > 2 else "",
++            "L_group_mean": f"{float(reduced_loss):.8f}",
++            "local_groups": triplet_num_groups,
++            "global_groups": global_groups,
++            "layout_views_this_microstep": global_layout_views,
++            "retention_samples_this_microstep": global_retention_samples,
++            "group_presentations_cumulative": self._triplet_debug_group_presentations,
++            "layout_view_presentations_cumulative": self._triplet_debug_layout_view_presentations,
++            "retention_presentations_cumulative": self._triplet_debug_retention_presentations,
++            "replay_effective_ratio_cumulative": (
++                f"{self._triplet_debug_retention_presentations / max(self._triplet_debug_layout_view_presentations + self._triplet_debug_retention_presentations, 1):.8f}"
++            ),
++            "triplet_group_size": triplet_group_size,
++            "world_size": self._triplet_world_size(),
++            "rank_max_memory_allocated_gb": f"{max_allocated_gb:.3f}",
++            "rank_memory_reserved_gb": f"{reserved_gb:.3f}",
++        }
++        for key, value in (extra_metrics or {}).items():
++            if torch.is_tensor(value):
++                if value.numel() == 1:
++                    value = value.detach().float().cpu().item()
++                else:
++                    value = value.detach().float().cpu().tolist()
++            if isinstance(value, float):
++                row[key] = f"{value:.8f}"
++            else:
++                row[key] = value
++        header = list(row.keys())
++        write_header = not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0
++        with open(csv_path, "a", encoding="utf-8") as f:
++            if write_header:
++                f.write(",".join(header) + "\n")
++            f.write(",".join(str(row[key]) for key in header) + "\n")
++
++    def _forward_with_expanded_labels(self, model, inputs):
++        original_labels = inputs.get("labels")
++        base_model = model.module if hasattr(model, "module") else model
++        (
++            input_ids,
++            position_ids,
++            attention_mask,
++            past_key_values,
++            inputs_embeds,
++            expanded_labels,
++        ) = base_model.prepare_inputs_labels_for_multimodal(
++            inputs.get("input_ids"),
++            inputs.get("position_ids"),
++            inputs.get("attention_mask"),
++            inputs.get("past_key_values"),
++            original_labels,
++            inputs.get("ecgs"),
++            inputs.get("images"),
++            inputs.get("image_sizes"),
++        )
++        model_inputs = dict(inputs)
++        model_inputs.update({
++            "input_ids": input_ids,
++            "position_ids": position_ids,
++            "attention_mask": attention_mask,
++            "past_key_values": past_key_values,
++            "inputs_embeds": inputs_embeds,
++            "labels": expanded_labels,
++        })
++        outputs = model(**model_inputs)
++        logits = outputs.get("logits") if isinstance(outputs, dict) else outputs.logits
++        return outputs, logits, expanded_labels
++
++    def _sequence_losses_from_logits(self, logits, labels):
++        shift_logits = logits[..., :-1, :].contiguous()
++        shift_labels = labels[..., 1:].contiguous()
++        vocab_size = shift_logits.shape[-1]
++        loss_fct = nn.CrossEntropyLoss(reduction="none", ignore_index=-100)
++        token_losses = loss_fct(
++            shift_logits.view(-1, vocab_size),
++            shift_labels.view(-1),
++        ).view(shift_labels.shape)
++        valid_tokens = shift_labels.ne(-100)
++        return (
++            token_losses.sum(dim=1) /
++            valid_tokens.sum(dim=1).clamp_min(1)
++        )
++
++    def _sequence_losses_from_logits_with_normalization(self, logits, labels, *, length_normalize: bool = True):
++        shift_logits = logits[..., :-1, :].contiguous()
++        shift_labels = labels[..., 1:].contiguous()
++        vocab_size = shift_logits.shape[-1]
++        loss_fct = nn.CrossEntropyLoss(reduction="none", ignore_index=-100)
++        token_losses = loss_fct(
++            shift_logits.view(-1, vocab_size),
++            shift_labels.view(-1),
++        ).view(shift_labels.shape)
++        valid_tokens = shift_labels.ne(-100)
++        losses = token_losses.sum(dim=1)
++        if length_normalize:
++            losses = losses / valid_tokens.sum(dim=1).clamp_min(1)
++        return losses
++
++    def _token_ce_loss_from_logits(self, logits, labels):
++        shift_logits = logits[..., :-1, :].contiguous()
++        shift_labels = labels[..., 1:].contiguous()
++        vocab_size = shift_logits.shape[-1]
++        loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
++        return loss_fct(shift_logits.view(-1, vocab_size), shift_labels.view(-1))
++
++    def _slice_example_batch(self, inputs, start: int, end: int):
++        sliced = {}
++        for key, value in inputs.items():
++            if value is None:
++                sliced[key] = value
++            elif torch.is_tensor(value):
++                sliced[key] = value[start:end]
++            elif isinstance(value, list):
++                sliced[key] = value[start:end]
++            else:
++                sliced[key] = value
++        return sliced
++
++    def _index_select_example_batch(self, inputs, indices: torch.Tensor):
++        selected = {}
++        if not torch.is_tensor(indices):
++            indices = torch.as_tensor(indices, dtype=torch.long)
++        cpu_indices = indices.detach().cpu().tolist()
++        for key, value in inputs.items():
++            if value is None:
++                selected[key] = value
++            elif torch.is_tensor(value):
++                if value.dim() > 0 and value.size(0) >= len(cpu_indices):
++                    selected[key] = value.index_select(0, indices.to(device=value.device, dtype=torch.long))
++                else:
++                    selected[key] = value
++            elif isinstance(value, list):
++                selected[key] = [value[i] for i in cpu_indices]
++            else:
++                selected[key] = value
++        return selected
++
++    def _trim_sequence_padding(self, inputs):
++        attention_mask = inputs.get("attention_mask")
++        if not torch.is_tensor(attention_mask) or attention_mask.dim() != 2 or attention_mask.numel() == 0:
++            return inputs
++        max_len = int(attention_mask.sum(dim=1).max().detach().cpu().item())
++        if max_len <= 0 or max_len >= attention_mask.shape[1]:
++            return inputs
++        trimmed = dict(inputs)
++        for key in ("input_ids", "labels", "attention_mask", "position_ids"):
++            value = trimmed.get(key)
++            if torch.is_tensor(value) and value.dim() == 2 and value.shape[1] == attention_mask.shape[1]:
++                trimmed[key] = value[:, :max_len].contiguous()
++        return trimmed
++
++    def _anchor_complete_row_indices(
++        self,
++        *,
++        candidate_row_index,
++        row_eligible,
++        row_target_answer_index,
++        row_answer_space_size,
++    ):
++        if candidate_row_index is None or row_target_answer_index is None or row_answer_space_size is None:
++            return [], 0
++        candidate_rows_cpu = candidate_row_index.detach().cpu()
++        row_eligible_cpu = row_eligible.detach().cpu() if torch.is_tensor(row_eligible) else None
++        target_cpu = row_target_answer_index.detach().cpu()
++        answer_size_cpu = row_answer_space_size.detach().cpu()
++        complete_rows = []
++        incomplete_rows = 0
++        for row_idx in range(int(answer_size_cpu.numel())):
++            if row_eligible_cpu is not None and not bool(row_eligible_cpu[row_idx].item()):
++                continue
++            answer_space_size = int(answer_size_cpu[row_idx].item())
++            target_idx = int(target_cpu[row_idx].item())
++            if answer_space_size < 2 or target_idx < 0 or target_idx >= answer_space_size:
++                continue
++            if int((candidate_rows_cpu == row_idx).sum().item()) != answer_space_size:
++                incomplete_rows += 1
++                continue
++            complete_rows.append(row_idx)
++        return complete_rows, incomplete_rows
++
++    def _anchor_margin_loss_sum_for_rows(
++        self,
++        candidate_scores,
++        *,
++        candidate_row_index,
++        candidate_answer_index,
++        row_target_answer_index,
++        row_answer_space_size,
++        row_indices,
++    ):
++        data_args = self._triplet_data_args()
++        margin_delta = float(getattr(data_args, "anchor_ecg_margin_delta", 0.5))
++        margin_losses = []
++        target_scores = []
++        best_wrong_scores = []
++        margins = []
++        for row_idx in row_indices:
++            answer_space_size = int(row_answer_space_size[row_idx].detach().cpu().item())
++            target_idx = int(row_target_answer_index[row_idx].detach().cpu().item())
++            mask = candidate_row_index == row_idx
++            scores = torch.full(
++                (answer_space_size,),
++                -torch.inf,
++                device=candidate_scores.device,
++                dtype=candidate_scores.dtype,
++            )
++            selected_scores = candidate_scores[mask]
++            selected_answer_indices = candidate_answer_index[mask]
++            for score, answer_idx in zip(selected_scores, selected_answer_indices):
++                scores[int(answer_idx.detach().cpu().item())] = score
++            wrong_mask = torch.ones(answer_space_size, device=scores.device, dtype=torch.bool)
++            wrong_mask[target_idx] = False
++            target_score = scores[target_idx]
++            best_wrong_score = scores[wrong_mask].max()
++            margin = target_score - best_wrong_score
++            margin_losses.append(F.relu(torch.as_tensor(margin_delta, device=scores.device, dtype=scores.dtype) - margin))
++            target_scores.append(target_score.reshape(1))
++            best_wrong_scores.append(best_wrong_score.reshape(1))
++            margins.append(margin.reshape(1))
++        if not margin_losses:
++            zero = candidate_scores.sum() * 0.0
++            return zero, {
++                "anchor_target_score_sum": zero.detach(),
++                "anchor_best_wrong_score_sum": zero.detach(),
++                "anchor_target_margin_sum": zero.detach(),
++                "anchor_positive_margin_count": 0.0,
++                "anchor_negative_margin_count": 0.0,
++                "anchor_margin_violation_count": 0.0,
++                "anchor_margin_row_count": 0.0,
++            }
++        loss_sum = torch.stack(margin_losses).sum()
++        all_target_scores = torch.cat(target_scores)
++        all_best_wrong_scores = torch.cat(best_wrong_scores)
++        all_margins = torch.cat(margins)
++        return loss_sum, {
++            "anchor_target_score_sum": all_target_scores.detach().sum(),
++            "anchor_best_wrong_score_sum": all_best_wrong_scores.detach().sum(),
++            "anchor_target_margin_sum": all_margins.detach().sum(),
++            "anchor_positive_margin_count": float(all_margins.detach().gt(0).float().sum().cpu().item()),
++            "anchor_negative_margin_count": float(all_margins.detach().lt(0).float().sum().cpu().item()),
++            "anchor_margin_violation_count": float(all_margins.detach().lt(margin_delta).float().sum().cpu().item()),
++            "anchor_margin_row_count": float(len(margin_losses)),
++        }
++
++    def _forward_sequence_losses(self, model, inputs):
++        outputs, logits, expanded_labels = self._forward_with_expanded_labels(model, inputs)
++        return outputs, self._sequence_losses_from_logits(logits, expanded_labels)
++
++    def _forward_sequence_losses_with_candidate_chunks(
++        self,
++        model,
++        inputs,
++        *,
++        base_count: int,
++        candidate_count: int,
++        candidate_chunk_size: int,
++    ):
++        if candidate_count <= 0 or candidate_chunk_size <= 0:
++            outputs, sequence_losses = self._forward_sequence_losses(model, inputs)
++            return outputs, sequence_losses, 1
++
++        outputs, base_sequence_losses = self._forward_sequence_losses(
++            model,
++            self._slice_example_batch(inputs, 0, base_count),
++        )
++        candidate_losses = []
++        num_forwards = 1
++        candidate_start = base_count
++        candidate_end = base_count + candidate_count
++        for start in range(candidate_start, candidate_end, candidate_chunk_size):
++            end = min(start + candidate_chunk_size, candidate_end)
++            _, chunk_losses = self._forward_sequence_losses(
++                model,
++                self._slice_example_batch(inputs, start, end),
++            )
++            candidate_losses.append(chunk_losses)
++            num_forwards += 1
++        if candidate_losses:
++            sequence_losses = torch.cat([base_sequence_losses] + candidate_losses, dim=0)
++        else:
++            sequence_losses = base_sequence_losses
++        return outputs, sequence_losses, num_forwards
++
++    def _layoutbind_losses(
++        self,
++        candidate_scores,
++        *,
++        candidate_group_index,
++        candidate_layout_index,
++        candidate_answer_index,
++        group_eligible,
++        group_target_answer_index,
++        group_answer_space_size,
++        group_size,
++    ):
++        data_args = self._triplet_data_args()
++        bind_losses = []
++        margin_losses = []
++        target_scores = []
++        best_wrong_scores = []
++        margins = []
++        num_groups = int(group_answer_space_size.numel())
++        for group_idx in range(num_groups):
++            if group_eligible is not None and not bool(group_eligible[group_idx].detach().cpu().item()):
++                continue
++            answer_space_size = int(group_answer_space_size[group_idx].detach().cpu().item())
++            target_idx = int(group_target_answer_index[group_idx].detach().cpu().item())
++            if answer_space_size < 2 or target_idx < 0:
++                continue
++            layout_scores = []
++            complete = True
++            for layout_idx in range(group_size):
++                mask = (candidate_group_index == group_idx) & (candidate_layout_index == layout_idx)
++                if int(mask.sum().detach().cpu().item()) != answer_space_size:
++                    complete = False
++                    break
++                scores = torch.empty(answer_space_size, device=candidate_scores.device, dtype=candidate_scores.dtype)
++                selected_scores = candidate_scores[mask]
++                selected_answer_indices = candidate_answer_index[mask]
++                for score, answer_idx in zip(selected_scores, selected_answer_indices):
++                    scores[int(answer_idx.detach().cpu().item())] = score
++                layout_scores.append(scores)
++            if not complete:
++                continue
++            scores_by_layout = torch.stack(layout_scores, dim=0)
++            bind_loss, margin_loss = compute_targetbind_margin_losses(
++                scores_by_layout,
++                target_idx,
++                alpha=float(getattr(data_args, "layoutbind_alpha", 0.5)),
++                label_smoothing=float(getattr(data_args, "layoutbind_label_smoothing", 0.05)),
++                margin_delta=float(getattr(data_args, "layoutbind_margin_delta", 0.5)),
++            )
++            bind_losses.append(bind_loss)
++            margin_losses.append(margin_loss)
++            wrong_mask = torch.ones(answer_space_size, device=scores_by_layout.device, dtype=torch.bool)
++            wrong_mask[target_idx] = False
++            target_score = scores_by_layout[:, target_idx]
++            best_wrong_score = scores_by_layout[:, wrong_mask].max(dim=1).values
++            margin = target_score - best_wrong_score
++            target_scores.append(target_score)
++            best_wrong_scores.append(best_wrong_score)
++            margins.append(margin)
++
++        if bind_losses:
++            bind_loss = torch.stack(bind_losses).mean()
++            margin_loss = torch.stack(margin_losses).mean()
++            all_target_scores = torch.cat(target_scores)
++            all_best_wrong_scores = torch.cat(best_wrong_scores)
++            all_margins = torch.cat(margins)
++            margin_delta = float(getattr(data_args, "layoutbind_margin_delta", 0.5))
++            stats = {
++                "target_score_mean": all_target_scores.mean(),
++                "best_wrong_score_mean": all_best_wrong_scores.mean(),
++                "target_margin_mean": all_margins.mean(),
++                "target_margin_positive_rate": all_margins.gt(0).float().mean(),
++                "target_margin_negative_rate": all_margins.lt(0).float().mean(),
++                "margin_violation_rate": all_margins.lt(margin_delta).float().mean(),
++                "kl_bind_loss_mean": bind_loss.detach(),
++                "layoutbind_eligible_groups_in_batch": float(len(bind_losses)),
++            }
++            return bind_loss, margin_loss, stats
++        zero = candidate_scores.sum() * 0.0
++        return zero, zero, {
++            "target_score_mean": zero.detach(),
++            "best_wrong_score_mean": zero.detach(),
++            "target_margin_mean": zero.detach(),
++            "target_margin_positive_rate": zero.detach(),
++            "target_margin_negative_rate": zero.detach(),
++            "margin_violation_rate": zero.detach(),
++            "kl_bind_loss_mean": zero.detach(),
++            "layoutbind_eligible_groups_in_batch": 0.0,
++        }
++
++    def _anchor_ecg_margin_loss(
++        self,
++        candidate_scores,
++        *,
++        candidate_row_index,
++        candidate_answer_index,
++        row_eligible,
++        row_target_answer_index,
++        row_answer_space_size,
++    ):
++        data_args = self._triplet_data_args()
++        margin_delta = float(getattr(data_args, "anchor_ecg_margin_delta", 0.5))
++        margin_losses = []
++        target_scores = []
++        best_wrong_scores = []
++        margins = []
++        eligible_rows = 0
++        incomplete_rows = 0
++        num_rows = int(row_answer_space_size.numel())
++        for row_idx in range(num_rows):
++            if row_eligible is not None and not bool(row_eligible[row_idx].detach().cpu().item()):
++                continue
++            answer_space_size = int(row_answer_space_size[row_idx].detach().cpu().item())
++            target_idx = int(row_target_answer_index[row_idx].detach().cpu().item())
++            if answer_space_size < 2 or target_idx < 0 or target_idx >= answer_space_size:
++                continue
++            mask = candidate_row_index == row_idx
++            if int(mask.sum().detach().cpu().item()) != answer_space_size:
++                incomplete_rows += 1
++                continue
++            scores = torch.full(
++                (answer_space_size,),
++                -torch.inf,
++                device=candidate_scores.device,
++                dtype=candidate_scores.dtype,
++            )
++            selected_scores = candidate_scores[mask]
++            selected_answer_indices = candidate_answer_index[mask]
++            for score, answer_idx in zip(selected_scores, selected_answer_indices):
++                scores[int(answer_idx.detach().cpu().item())] = score
++            wrong_mask = torch.ones(answer_space_size, device=scores.device, dtype=torch.bool)
++            wrong_mask[target_idx] = False
++            target_score = scores[target_idx]
++            best_wrong_score = scores[wrong_mask].max()
++            margin = target_score - best_wrong_score
++            margin_losses.append(F.relu(torch.as_tensor(margin_delta, device=scores.device, dtype=scores.dtype) - margin))
++            target_scores.append(target_score.reshape(1))
++            best_wrong_scores.append(best_wrong_score.reshape(1))
++            margins.append(margin.reshape(1))
++            eligible_rows += 1
++
++        if margin_losses:
++            margin_loss = torch.stack(margin_losses).mean()
++            all_target_scores = torch.cat(target_scores)
++            all_best_wrong_scores = torch.cat(best_wrong_scores)
++            all_margins = torch.cat(margins)
++            stats = {
++                "anchor_target_score_mean": all_target_scores.mean(),
++                "anchor_best_wrong_score_mean": all_best_wrong_scores.mean(),
++                "anchor_target_margin_mean": all_margins.mean(),
++                "anchor_target_margin_positive_rate": all_margins.gt(0).float().mean(),
++                "anchor_target_margin_negative_rate": all_margins.lt(0).float().mean(),
++                "anchor_margin_violation_rate": all_margins.lt(margin_delta).float().mean(),
++                "anchor_eligible_rows_in_batch": float(eligible_rows),
++                "anchor_incomplete_rows_in_batch": float(incomplete_rows),
++            }
++            return margin_loss, stats
++
++        zero = candidate_scores.sum() * 0.0
++        return zero, {
++            "anchor_target_score_mean": zero.detach(),
++            "anchor_best_wrong_score_mean": zero.detach(),
++            "anchor_target_margin_mean": zero.detach(),
++            "anchor_target_margin_positive_rate": zero.detach(),
++            "anchor_target_margin_negative_rate": zero.detach(),
++            "anchor_margin_violation_rate": zero.detach(),
++            "anchor_eligible_rows_in_batch": 0.0,
++            "anchor_incomplete_rows_in_batch": float(incomplete_rows),
++        }
++
++    def _write_anchor_debug_row(
++        self,
++        *,
++        loss,
++        ce_loss,
++        margin_loss,
++        weighted_margin,
++        base_count,
++        candidate_count,
++        skipped_count,
++        extra_metrics,
++    ):
++        csv_path = os.environ.get("ANCHOR_ECG_TRAIN_LOG_CSV") or os.environ.get("TRIPLET_TRAIN_LOG_CSV")
++        if not csv_path:
++            return
++        rank = self._triplet_rank()
++        if rank != 0:
++            root, ext = os.path.splitext(csv_path)
++            csv_path = f"{root}.rank{rank}{ext or '.csv'}"
++        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
++        if not hasattr(self, "_anchor_debug_start_time"):
++            self._anchor_debug_start_time = time.time()
++            self._anchor_debug_micro_step = 0
++            self._anchor_debug_base_rows = 0
++            self._anchor_debug_candidate_rows = 0
++        self._anchor_debug_micro_step += 1
++        self._anchor_debug_base_rows += int(base_count)
++        self._anchor_debug_candidate_rows += int(candidate_count)
++        max_allocated_gb = torch.cuda.max_memory_allocated() / (1024 ** 3) if torch.cuda.is_available() else 0.0
++        reserved_gb = torch.cuda.memory_reserved() / (1024 ** 3) if torch.cuda.is_available() else 0.0
++        row = {
++            "time_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
++            "elapsed_sec": f"{time.time() - self._anchor_debug_start_time:.3f}",
++            "optimizer_step": int(self.state.global_step),
++            "micro_step": int(self._anchor_debug_micro_step),
++            "rank": rank,
++            "total_loss": f"{float(loss.detach().float().cpu()):.8f}",
++            "CE_all": f"{float(ce_loss.detach().float().cpu()):.8f}",
++            "L_TargetMargin_bind_raw": f"{float(margin_loss.detach().float().cpu()):.8f}",
++            "weighted_TargetMargin_bind": f"{float(weighted_margin.detach().float().cpu()):.8f}",
++            "base_rows_this_microstep": int(base_count),
++            "candidate_rows_this_microstep": int(candidate_count),
++            "anchor_rows_skipped_this_microstep": int(skipped_count),
++            "base_rows_cumulative": int(self._anchor_debug_base_rows),
++            "candidate_rows_cumulative": int(self._anchor_debug_candidate_rows),
++            "rank_max_memory_allocated_gb": f"{max_allocated_gb:.3f}",
++            "rank_memory_reserved_gb": f"{reserved_gb:.3f}",
++        }
++        for key, value in (extra_metrics or {}).items():
++            if torch.is_tensor(value):
++                if value.numel() == 1:
++                    value = value.detach().float().cpu().item()
++                else:
++                    value = value.detach().float().cpu().tolist()
++            if isinstance(value, float):
++                row[key] = f"{value:.8f}"
++            else:
++                row[key] = value
++        header = list(row.keys())
++        write_header = not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0
++        with open(csv_path, "a", encoding="utf-8") as f:
++            if write_header:
++                f.write(",".join(header) + "\n")
++            f.write(",".join(str(row[key]) for key in header) + "\n")
++
++    def _compute_anchor_ecg_rowwise_loss(self, model, inputs, return_outputs=False, **kwargs):
++        base_count_tensor = inputs.pop("anchor_ecg_base_count", None)
++        candidate_count_tensor = inputs.pop("anchor_ecg_candidate_count", None)
++        candidate_row_index = inputs.pop("anchor_ecg_candidate_row_index", None)
++        candidate_answer_index = inputs.pop("anchor_ecg_candidate_answer_index", None)
++        row_eligible = inputs.pop("anchor_ecg_row_eligible", None)
++        row_target_answer_index = inputs.pop("anchor_ecg_row_target_answer_index", None)
++        row_answer_space_size = inputs.pop("anchor_ecg_row_answer_space_size", None)
++        skipped_tensor = inputs.pop("anchor_ecg_rows_skipped", None)
++
++        candidate_count = int(candidate_count_tensor.detach().cpu().item()) if torch.is_tensor(candidate_count_tensor) else int(candidate_count_tensor or 0)
++        if candidate_count <= 0:
++            return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
++        if base_count_tensor is None:
++            raise ValueError("TRACE-ECG row-wise loss requires anchor_ecg_base_count.")
++        base_count = int(base_count_tensor.detach().cpu().item()) if torch.is_tensor(base_count_tensor) else int(base_count_tensor)
++        skipped_count = int(skipped_tensor.detach().cpu().item()) if torch.is_tensor(skipped_tensor) else int(skipped_tensor or 0)
++        data_args = self._triplet_data_args()
++        length_normalize = bool(getattr(data_args, "anchor_ecg_length_normalize", True))
++
++        outputs, logits, expanded_labels = self._forward_with_expanded_labels(model, inputs)
++        sequence_count = int(expanded_labels.shape[0])
++        if sequence_count != base_count + candidate_count:
++            raise ValueError(
++                f"TRACE-ECG expected {base_count + candidate_count} flattened examples "
++                f"({base_count} base + {candidate_count} candidates), got {sequence_count}."
++            )
++        ce_loss = self._token_ce_loss_from_logits(logits[:base_count], expanded_labels[:base_count])
++        candidate_losses = self._sequence_losses_from_logits_with_normalization(
++            logits[base_count:],
++            expanded_labels[base_count:],
++            length_normalize=length_normalize,
++        )
++        candidate_scores = -candidate_losses
++        margin_loss, stats = self._anchor_ecg_margin_loss(
++            candidate_scores,
++            candidate_row_index=candidate_row_index,
++            candidate_answer_index=candidate_answer_index,
++            row_eligible=row_eligible,
++            row_target_answer_index=row_target_answer_index,
++            row_answer_space_size=row_answer_space_size,
++        )
++        lambda_margin = float(getattr(data_args, "anchor_ecg_lambda_margin", 0.05))
++        weighted_margin = lambda_margin * margin_loss
++        loss = ce_loss + weighted_margin
++        self._write_anchor_debug_row(
++            loss=loss,
++            ce_loss=ce_loss,
++            margin_loss=margin_loss,
++            weighted_margin=weighted_margin,
++            base_count=base_count,
++            candidate_count=candidate_count,
++            skipped_count=skipped_count,
++            extra_metrics={
++                "anchor_ecg_lambda_margin": lambda_margin,
++                "anchor_ecg_margin_delta": float(getattr(data_args, "anchor_ecg_margin_delta", 0.5)),
++                "anchor_ecg_length_normalize": int(length_normalize),
++                **stats,
++            },
++        )
++        return (loss, outputs) if return_outputs else loss
++
++    def _anchor_ecg_backward(self, loss: torch.Tensor) -> None:
++        if self.args.n_gpu > 1:
++            loss = loss.mean()
++        if self.use_apex:
++            raise RuntimeError("TRACE-ECG memory-safe backward does not support Apex AMP.")
++        self.accelerator.backward(loss)
++
++    def _anchor_ecg_zero_trainable_loss(self, model) -> torch.Tensor:
++        zero = None
++        for param in model.parameters():
++            if not param.requires_grad:
++                continue
++            term = param.reshape(-1)[0] * 0.0
++            zero = term if zero is None else zero + term
++        if zero is None:
++            raise RuntimeError("TRACE-ECG memory-safe backward found no trainable parameters.")
++        return zero
++
++    def _anchor_ecg_memory_safe_training_step(self, model, inputs) -> torch.Tensor:
++        model.train()
++        inputs = self._prepare_inputs(inputs)
++        if is_sagemaker_mp_enabled():
++            raise RuntimeError("TRACE-ECG memory-safe backward does not support SageMaker model parallel.")
++
++        with self.compute_loss_context_manager():
++            base_count_tensor = inputs.pop("anchor_ecg_base_count", None)
++            candidate_count_tensor = inputs.pop("anchor_ecg_candidate_count", None)
++            candidate_row_index = inputs.pop("anchor_ecg_candidate_row_index", None)
++            candidate_answer_index = inputs.pop("anchor_ecg_candidate_answer_index", None)
++            row_eligible = inputs.pop("anchor_ecg_row_eligible", None)
++            row_target_answer_index = inputs.pop("anchor_ecg_row_target_answer_index", None)
++            row_answer_space_size = inputs.pop("anchor_ecg_row_answer_space_size", None)
++            skipped_tensor = inputs.pop("anchor_ecg_rows_skipped", None)
++
++            candidate_count = int(candidate_count_tensor.detach().cpu().item()) if torch.is_tensor(candidate_count_tensor) else int(candidate_count_tensor or 0)
++            if base_count_tensor is None:
++                loss = super().compute_loss(model, inputs)
++                self._anchor_ecg_backward(loss)
++                return loss.detach() / self.args.gradient_accumulation_steps
++
++            base_count = int(base_count_tensor.detach().cpu().item()) if torch.is_tensor(base_count_tensor) else int(base_count_tensor)
++            skipped_count = int(skipped_tensor.detach().cpu().item()) if torch.is_tensor(skipped_tensor) else int(skipped_tensor or 0)
++            data_args = self._triplet_data_args()
++            length_normalize = bool(getattr(data_args, "anchor_ecg_length_normalize", True))
++            lambda_margin = float(getattr(data_args, "anchor_ecg_lambda_margin", 0.05))
++            chunk_bind_rows = int(getattr(data_args, "anchor_ecg_margin_chunk_bind_rows", 2) or 2)
++            chunk_bind_rows = max(1, chunk_bind_rows)
++
++            base_inputs = self._trim_sequence_padding(self._slice_example_batch(inputs, 0, base_count))
++            _, base_logits, base_labels = self._forward_with_expanded_labels(model, base_inputs)
++            ce_loss = self._token_ce_loss_from_logits(base_logits, base_labels)
++            self._anchor_ecg_backward(ce_loss)
++            total_loss_for_log = ce_loss.detach()
++            del base_logits, base_labels, base_inputs
++
++            complete_rows, incomplete_rows = self._anchor_complete_row_indices(
++                candidate_row_index=candidate_row_index,
++                row_eligible=row_eligible,
++                row_target_answer_index=row_target_answer_index,
++                row_answer_space_size=row_answer_space_size,
++            )
++            eligible_row_count = len(complete_rows)
++            weighted_margin_for_log = ce_loss.detach() * 0.0
++            margin_loss_for_log = ce_loss.detach() * 0.0
++            stats_accum = {
++                "anchor_target_score_sum": 0.0,
++                "anchor_best_wrong_score_sum": 0.0,
++                "anchor_target_margin_sum": 0.0,
++                "anchor_positive_margin_count": 0.0,
++                "anchor_negative_margin_count": 0.0,
++                "anchor_margin_violation_count": 0.0,
++                "anchor_margin_row_count": 0.0,
++            }
++            margin_chunk_count = 0
++
++            # DeepSpeed expects the same backward-call structure on every rank.
++            # Avoid collectives between split backwards; use the configured
++            # microbatch upper bound so ranks with fewer eligible rows emit
++            # zero-loss backwards in the same slots.
++            static_row_bound = max(
++                int(base_count),
++                int(getattr(self.args, "per_device_train_batch_size", 0) or 0),
++                int(row_answer_space_size.numel()) if torch.is_tensor(row_answer_space_size) else 0,
++            )
++            global_margin_chunk_count = (static_row_bound + chunk_bind_rows - 1) // chunk_bind_rows
++
++            for chunk_idx in range(global_margin_chunk_count):
++                row_start = chunk_idx * chunk_bind_rows
++                chunk_rows = complete_rows[row_start:row_start + chunk_bind_rows] if row_start < eligible_row_count else []
++                if not chunk_rows:
++                    self._anchor_ecg_backward(self._anchor_ecg_zero_trainable_loss(model))
++                    margin_chunk_count += 1
++                    continue
++                row_mask = torch.zeros_like(candidate_row_index, dtype=torch.bool)
++                for row_idx in chunk_rows:
++                    row_mask |= candidate_row_index == row_idx
++                candidate_local_indices = row_mask.nonzero(as_tuple=False).flatten()
++                if candidate_local_indices.numel() == 0:
++                    self._anchor_ecg_backward(self._anchor_ecg_zero_trainable_loss(model))
++                    margin_chunk_count += 1
++                    continue
++                overall_indices = candidate_local_indices + base_count
++                chunk_inputs = self._trim_sequence_padding(
++                    self._index_select_example_batch(inputs, overall_indices)
++                )
++                _, candidate_logits, candidate_labels = self._forward_with_expanded_labels(model, chunk_inputs)
++                candidate_losses = self._sequence_losses_from_logits_with_normalization(
++                    candidate_logits,
++                    candidate_labels,
++                    length_normalize=length_normalize,
++                )
++                candidate_scores = -candidate_losses
++                chunk_candidate_row_index = candidate_row_index.index_select(0, candidate_local_indices.to(candidate_row_index.device))
++                chunk_candidate_answer_index = candidate_answer_index.index_select(0, candidate_local_indices.to(candidate_answer_index.device))
++                chunk_loss_sum, chunk_stats = self._anchor_margin_loss_sum_for_rows(
++                    candidate_scores,
++                    candidate_row_index=chunk_candidate_row_index,
++                    candidate_answer_index=chunk_candidate_answer_index,
++                    row_target_answer_index=row_target_answer_index,
++                    row_answer_space_size=row_answer_space_size,
++                    row_indices=chunk_rows,
++                )
++                chunk_loss = lambda_margin * chunk_loss_sum / float(eligible_row_count)
++                self._anchor_ecg_backward(chunk_loss)
++                weighted_margin_for_log = weighted_margin_for_log + chunk_loss.detach()
++                margin_loss_for_log = margin_loss_for_log + (chunk_loss_sum.detach() / float(eligible_row_count))
++                margin_chunk_count += 1
++                for key, value in chunk_stats.items():
++                    if torch.is_tensor(value):
++                        value = float(value.detach().float().cpu().item())
++                    stats_accum[key] += float(value)
++                del (
++                    candidate_logits,
++                    candidate_labels,
++                    candidate_losses,
++                    candidate_scores,
++                    chunk_inputs,
++                    chunk_candidate_row_index,
++                    chunk_candidate_answer_index,
++                    chunk_loss,
++                    chunk_loss_sum,
++                )
++
++            total_loss_for_log = total_loss_for_log + weighted_margin_for_log
++            row_count_for_stats = max(stats_accum["anchor_margin_row_count"], 1.0)
++            extra_metrics = {
++                "anchor_ecg_lambda_margin": lambda_margin,
++                "anchor_ecg_margin_delta": float(getattr(data_args, "anchor_ecg_margin_delta", 0.5)),
++                "anchor_ecg_length_normalize": int(length_normalize),
++                "anchor_ecg_memory_safe_backward": 1,
++                "anchor_ecg_margin_chunk_bind_rows": chunk_bind_rows,
++                "anchor_margin_chunk_count": margin_chunk_count,
++                "anchor_eligible_rows_in_batch": float(eligible_row_count),
++                "anchor_incomplete_rows_in_batch": float(incomplete_rows),
++                "anchor_target_score_mean": stats_accum["anchor_target_score_sum"] / row_count_for_stats,
++                "anchor_best_wrong_score_mean": stats_accum["anchor_best_wrong_score_sum"] / row_count_for_stats,
++                "anchor_target_margin_mean": stats_accum["anchor_target_margin_sum"] / row_count_for_stats,
++                "anchor_target_margin_positive_rate": stats_accum["anchor_positive_margin_count"] / row_count_for_stats,
++                "anchor_target_margin_negative_rate": stats_accum["anchor_negative_margin_count"] / row_count_for_stats,
++                "anchor_margin_violation_rate": stats_accum["anchor_margin_violation_count"] / row_count_for_stats,
++            }
++            self._write_anchor_debug_row(
++                loss=total_loss_for_log,
++                ce_loss=ce_loss.detach(),
++                margin_loss=margin_loss_for_log,
++                weighted_margin=weighted_margin_for_log,
++                base_count=base_count,
++                candidate_count=candidate_count,
++                skipped_count=skipped_count,
++                extra_metrics=extra_metrics,
++            )
++            return total_loss_for_log.detach() / self.args.gradient_accumulation_steps
++
++    def training_step(self, model: nn.Module, inputs) -> torch.Tensor:
++        data_args = self._triplet_data_args()
++        anchor_enabled = bool(
++            data_args is not None
++            and (getattr(data_args, "anchor_ecg_enable", False) or getattr(data_args, "targetmargin_enable", False))
++            and getattr(data_args, "anchor_ecg_memory_safe_backward", False)
++        )
++        if anchor_enabled and inputs.get("anchor_ecg_candidate_count", None) is not None:
++            return self._anchor_ecg_memory_safe_training_step(model, inputs)
++        return super().training_step(model, inputs)
++
++    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
++        triplet_group_size = inputs.pop("triplet_group_size", None)
++        triplet_num_groups = inputs.pop("triplet_num_groups", None)
++        if triplet_group_size is None:
++            anchor_candidate_count = inputs.get("anchor_ecg_candidate_count", None)
++            data_args = self._triplet_data_args()
++            anchor_enabled = bool(
++                getattr(data_args, "anchor_ecg_enable", False)
++                or getattr(data_args, "targetmargin_enable", False)
++            )
++            if anchor_enabled and anchor_candidate_count is not None:
++                return self._compute_anchor_ecg_rowwise_loss(model, inputs, return_outputs=return_outputs, **kwargs)
++            for key in (
++                "anchor_ecg_base_count",
++                "anchor_ecg_candidate_count",
++                "anchor_ecg_candidate_row_index",
++                "anchor_ecg_candidate_answer_index",
++                "anchor_ecg_row_eligible",
++                "anchor_ecg_row_target_answer_index",
++                "anchor_ecg_row_answer_space_size",
++                "anchor_ecg_rows_skipped",
++            ):
++                inputs.pop(key, None)
++            return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
++
++        retention_num_samples_tensor = inputs.pop("retention_num_samples", None)
++        candidate_count_tensor = inputs.pop("layoutbind_candidate_count", None)
++
++        candidate_group_index = inputs.pop("layoutbind_candidate_group_index", None)
++        candidate_layout_index = inputs.pop("layoutbind_candidate_layout_index", None)
++        candidate_answer_index = inputs.pop("layoutbind_candidate_answer_index", None)
++        group_eligible = inputs.pop("layoutbind_group_eligible", None)
++        group_target_answer_index = inputs.pop("layoutbind_group_target_answer_index", None)
++        group_answer_space_size = inputs.pop("layoutbind_group_answer_space_size", None)
++
++        if torch.is_tensor(triplet_group_size):
++            triplet_group_size = int(triplet_group_size.detach().cpu().item())
++        else:
++            triplet_group_size = int(triplet_group_size)
++        if torch.is_tensor(triplet_num_groups):
++            triplet_num_groups = int(triplet_num_groups.detach().cpu().item())
++        else:
++            triplet_num_groups = int(triplet_num_groups)
++
++        expected = triplet_num_groups * triplet_group_size
++        retention_num_samples = 0
++        if retention_num_samples_tensor is not None:
++            retention_num_samples = int(retention_num_samples_tensor.detach().cpu().item())
++        candidate_count = 0
++        if candidate_count_tensor is not None:
++            candidate_count = int(candidate_count_tensor.detach().cpu().item())
++        total_expected = expected + retention_num_samples + candidate_count
++        data_args = self._triplet_data_args()
++        candidate_chunk_size = int(getattr(data_args, "layoutbind_candidate_chunk_size", 0) or 0)
++        if candidate_chunk_size > 0:
++            raise RuntimeError(
++                "layoutbind_candidate_chunk_size > 0 is currently disabled. "
++                "The prototype preserves the loss but DeepSpeed ZeRO-2 reduces the same LoRA "
++                "parameters multiple times when multiple forward graphs are backpropagated in "
++                "one training_step. Use 0 for the supported exact LayoutBind path."
++            )
++        outputs, sequence_losses, model_forward_calls = self._forward_sequence_losses_with_candidate_chunks(
++            model,
++            inputs,
++            base_count=expected + retention_num_samples,
++            candidate_count=candidate_count,
++            candidate_chunk_size=candidate_chunk_size,
++        )
++        if sequence_losses.numel() != total_expected:
++            raise ValueError(
++                f"Grouped triplet loss expected {total_expected} flattened examples "
++                f"({expected} triplet + {retention_num_samples} retention + {candidate_count} candidates), "
++                f"got {sequence_losses.numel()}."
++            )
++
++        triplet_sequence_losses = sequence_losses[:expected]
++        retention_sequence_losses = sequence_losses[expected:expected + retention_num_samples]
++        candidate_sequence_losses = sequence_losses[expected + retention_num_samples:]
++
++        layout_losses = triplet_sequence_losses.view(triplet_num_groups, triplet_group_size).mean(dim=0)
++        group_losses = triplet_sequence_losses.view(triplet_num_groups, triplet_group_size).mean(dim=1)
++        bind_ce_loss = group_losses.mean()
++        retention_loss = (
++            retention_sequence_losses.mean()
++            if retention_sequence_losses.numel() > 0
++            else sequence_losses.sum() * 0.0
++        )
++
++        bind_view_count = torch.tensor(float(triplet_sequence_losses.numel()), device=sequence_losses.device, dtype=sequence_losses.dtype)
++        retention_view_count = torch.tensor(float(retention_num_samples), device=sequence_losses.device, dtype=sequence_losses.dtype)
++        loss = (
++            bind_ce_loss * bind_view_count + retention_loss * retention_view_count
++        ) / (bind_view_count + retention_view_count).clamp_min(1.0)
++        mixed_ce_loss = loss
++        layoutbind_enabled = bool(getattr(data_args, "layoutbind_enable", False))
++        bind_loss = sequence_losses.sum() * 0.0
++        margin_loss = sequence_losses.sum() * 0.0
++        layoutbind_stats = {
++            "target_score_mean": bind_loss.detach(),
++            "best_wrong_score_mean": bind_loss.detach(),
++            "target_margin_mean": bind_loss.detach(),
++            "target_margin_positive_rate": bind_loss.detach(),
++            "target_margin_negative_rate": bind_loss.detach(),
++            "margin_violation_rate": bind_loss.detach(),
++            "kl_bind_loss_mean": bind_loss.detach(),
++            "layoutbind_eligible_groups_in_batch": 0.0,
++        }
++        if (
++            layoutbind_enabled
++            and candidate_sequence_losses.numel() > 0
++            and candidate_group_index is not None
++            and candidate_layout_index is not None
++            and candidate_answer_index is not None
++            and group_target_answer_index is not None
++            and group_answer_space_size is not None
++        ):
++            candidate_scores = -candidate_sequence_losses
++            bind_loss, margin_loss, layoutbind_stats = self._layoutbind_losses(
++                candidate_scores,
++                candidate_group_index=candidate_group_index,
++                candidate_layout_index=candidate_layout_index,
++                candidate_answer_index=candidate_answer_index,
++                group_eligible=group_eligible,
++                group_target_answer_index=group_target_answer_index,
++                group_answer_space_size=group_answer_space_size,
++                group_size=triplet_group_size,
++            )
++            loss = (
++                loss
++                + float(getattr(data_args, "layoutbind_lambda_bind", 0.05)) * bind_loss
++                + float(getattr(data_args, "layoutbind_lambda_margin", 0.02)) * margin_loss
++            )
++        lambda_bind = float(getattr(data_args, "layoutbind_lambda_bind", 0.05))
++        lambda_margin = float(getattr(data_args, "layoutbind_lambda_margin", 0.02))
++        self._write_triplet_debug_row(
++            loss=loss,
++            layout_losses=layout_losses,
++            triplet_num_groups=triplet_num_groups,
++            triplet_group_size=triplet_group_size,
++            retention_num_samples=retention_num_samples,
++            extra_metrics={
++                "bind_ce_loss": bind_ce_loss.detach(),
++                "retention_loss": retention_loss.detach(),
++                "mixed_ce_loss": mixed_ce_loss.detach(),
++                "L_TargetBind_raw": bind_loss.detach(),
++                "weighted_TargetBind": (lambda_bind * bind_loss).detach(),
++                "L_TargetMargin_raw": margin_loss.detach(),
++                "weighted_TargetMargin": (lambda_margin * margin_loss).detach(),
++                "layoutbind_candidate_examples": float(candidate_count),
++                "layoutbind_candidate_chunk_size": float(candidate_chunk_size),
++                "layoutbind_model_forward_calls": float(model_forward_calls),
++                **layoutbind_stats,
++            },
++        )
++        return (loss, outputs) if return_outputs else loss
++
+     def _get_train_sampler(self) -> Optional[torch.utils.data.Sampler]:
+         if self.train_dataset is None or not has_length(self.train_dataset):
+             return None
+diff --git a/llava/train/train.py b/llava/train/train.py
+index 97d3876..4c0a012 100644
+--- a/llava/train/train.py
++++ b/llava/train/train.py
+@@ -19,19 +19,25 @@
+ from dataclasses import dataclass, field
+ import json
+ import logging
++import math
+ import pathlib
+-from typing import Dict, Optional, Sequence, List
++import contextlib
++from typing import Any, Dict, Optional, Sequence, List
+ 
+ import torch
+ 
+ import transformers
+ import tokenizers
++from accelerate import Accelerator
++from accelerate.utils import DistributedType
+ 
+ from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+ from torch.utils.data import Dataset
+ from llava.train.llava_trainer import LLaVATrainer
+ 
+ from llava import conversation as conversation_lib
++from llava.layoutbind_utils import infer_layoutbind_answer_space, is_layoutbind_tier_eligible
++from llava.jsonl_utils import load_json_or_jsonl
+ from llava.model import *
+ from llava.mm_utils import tokenizer_image_token, process_anyres_image
+ 
+@@ -42,6 +48,43 @@
+ # os.environ["WANDB_DISABLED"] = "true"
+ 
+ local_rank = None
++DEFAULT_ATTN_IMPLEMENTATION = os.environ.get("GEM_ATTN_IMPL", "sdpa")
++
++
++def _patch_accelerate_deepspeed_zero_nosync():
++    if getattr(Accelerator.no_sync, "_gem_deepspeed_zero_patch", False):
++        return
++
++    @contextlib.contextmanager
++    def no_sync(self, model):
++        context = contextlib.nullcontext
++        use_model_no_sync = self.use_distributed
++
++        if self.distributed_type == DistributedType.DEEPSPEED:
++            plugin = getattr(self.state, "deepspeed_plugin", None)
++            zero_stage = getattr(plugin, "zero_stage", None)
++            if zero_stage is None:
++                ds_config = getattr(plugin, "deepspeed_config", {}) or {}
++                zero_config = ds_config.get("zero_optimization", {})
++                zero_stage = zero_config.get("stage", 0) if isinstance(zero_config, dict) else 0
++            try:
++                zero_stage = int(zero_stage)
++            except (TypeError, ValueError):
++                zero_stage = 0
++            if zero_stage >= 2:
++                use_model_no_sync = False
++
++        if use_model_no_sync:
++            context = getattr(model, "no_sync", context)
++
++        with context():
++            yield
++
++    no_sync._gem_deepspeed_zero_patch = True
++    Accelerator.no_sync = no_sync
++
++
++_patch_accelerate_deepspeed_zero_nosync()
+ 
+ 
+ def rank0_print(*args):
+@@ -49,6 +92,56 @@ def rank0_print(*args):
+         print(*args)
+ 
+ 
++class SaveAtRatiosCallback(transformers.TrainerCallback):
++    def __init__(self, ratios: Sequence[float]):
++        self.ratios = sorted(set(float(r) for r in ratios if 0 < float(r) < 1))
++        self.save_steps = []
++        self.triggered = set()
++
++    def on_train_begin(self, args, state, control, **kwargs):
++        max_steps = int(getattr(state, "max_steps", 0) or 0)
++        if max_steps <= 0:
++            rank0_print("GEM_SAVE_RATIOS ignored because max_steps is unavailable.")
++            return control
++        self.save_steps = sorted(
++            set(max(1, min(max_steps - 1, int(math.ceil(r * max_steps)))) for r in self.ratios)
++        )
++        rank0_print(
++            f"GEM_SAVE_RATIOS active: ratios={self.ratios}, "
++            f"max_steps={max_steps}, save_steps={self.save_steps}"
++        )
++        return control
++
++    def on_step_end(self, args, state, control, **kwargs):
++        step = int(getattr(state, "global_step", 0) or 0)
++        if step in self.save_steps and step not in self.triggered:
++            self.triggered.add(step)
++            rank0_print(f"GEM_SAVE_RATIOS triggering checkpoint save at step {step}.")
++            control.should_save = True
++        return control
++
++
++def parse_save_ratios_from_env() -> List[float]:
++    raw = os.environ.get("GEM_SAVE_RATIOS", "").strip()
++    if not raw:
++        return []
++    ratios = []
++    for item in raw.split(","):
++        item = item.strip()
++        if not item:
++            continue
++        try:
++            value = float(item)
++        except ValueError:
++            rank0_print(f"Ignoring invalid GEM_SAVE_RATIOS item: {item!r}")
++            continue
++        if 0 < value < 1:
++            ratios.append(value)
++        else:
++            rank0_print(f"Ignoring out-of-range GEM_SAVE_RATIOS item: {item!r}")
++    return ratios
++
++
+ from packaging import version
+ IS_TOKENIZER_GREATER_THAN_0_14 = version.parse(tokenizers.__version__) >= version.parse('0.14')
+ 
+@@ -72,6 +165,12 @@ class ModelArguments:
+     mm_use_im_patch_token: bool = field(default=True)
+     mm_patch_merge_type: Optional[str] = field(default='flat')
+     mm_vision_select_feature: Optional[str] = field(default="patch")
++    train_ecg_tower: bool = field(default=False)
++    ecg_tower_unlocked_groups: Optional[int] = field(default=None)
++    train_vision_tower: bool = field(default=False)
++    vision_tower_unlocked_layers: Optional[int] = field(default=None)
++    train_mm_projector: bool = field(default=False)
++    freeze_ecg_projector: bool = field(default=False)
+ 
+ 
+ @dataclass
+@@ -84,6 +183,68 @@ class DataArguments:
+     image_aspect_ratio: str = 'square'
+     ecg_folder: Optional[str] = field(default=None)
+     ecg_seq_length: Optional[int] = field(default=5000)
++    grouped_triplet_training: bool = field(
++        default=False,
++        metadata={"help": "Treat each dataset row as one same-signal three-layout triplet."},
++    )
++    grouped_triplet_layouts: str = field(
++        default="3R4C,6R2C,12R1C",
++        metadata={"help": "Comma-separated layout order used for grouped triplet training."},
++    )
++    layoutbind_enable: bool = field(
++        default=False,
++        metadata={"help": "Enable opt-in LayoutBind TargetBind/TargetMargin losses for eligible grouped triplets."},
++    )
++    layoutbind_lambda_bind: float = field(default=0.05)
++    layoutbind_lambda_margin: float = field(default=0.02)
++    layoutbind_alpha: float = field(default=0.5)
++    layoutbind_label_smoothing: float = field(default=0.05)
++    layoutbind_margin_delta: float = field(default=0.5)
++    layoutbind_eligibility_tier: str = field(
++        default="strict",
++        metadata={"help": "LayoutBind eligibility tier: strict or broad. Used only when layoutbind_enable is true."},
++    )
++    layoutbind_candidate_chunk_size: int = field(
++        default=0,
++        metadata={"help": "Optional exact candidate-scoring chunk size. 0 keeps the current single batched forward."},
++    )
++    anchor_ecg_enable: bool = field(
++        default=False,
++        metadata={"help": "Enable TRACE-ECG row-wise TargetMargin loss. This is the main method; it does not enable TargetBind."},
++    )
++    anchor_ecg_rowwise: bool = field(
++        default=True,
++        metadata={"help": "Use expanded row-level TargetMargin without grouped triplet training."},
++    )
++    anchor_ecg_lambda_margin: float = field(default=0.05)
++    anchor_ecg_margin_delta: float = field(default=0.5)
++    anchor_ecg_length_normalize: bool = field(default=True)
++    anchor_ecg_strict_eligibility: bool = field(default=True)
++    anchor_ecg_candidate_max: Optional[int] = field(
++        default=None,
++        metadata={"help": "Optional maximum candidate answers per row. None keeps all candidates."},
++    )
++    anchor_ecg_memory_safe_backward: bool = field(
++        default=False,
++        metadata={"help": "Split TRACE-ECG CE and TargetMargin backward passes to reduce peak memory without changing the objective."},
++    )
++    anchor_ecg_margin_chunk_bind_rows: int = field(
++        default=2,
++        metadata={"help": "Number of bind-eligible rows per TargetMargin backward chunk when memory-safe TRACE-ECG is enabled."},
++    )
++    targetmargin_enable: bool = field(
++        default=False,
++        metadata={"help": "Backward-compatible alias for --anchor_ecg_enable."},
++    )
++    targetmargin_rowwise: bool = field(default=True)
++    targetmargin_lambda: float = field(default=0.05)
++    targetmargin_delta: float = field(default=0.5)
++    targetmargin_length_normalize: bool = field(default=True)
++    targetmargin_strict_eligibility: bool = field(default=True)
++    retention_data_path: Optional[str] = field(
++        default=None,
++        metadata={"help": "Optional SFT-only retention replay JSON/JSONL mixed with grouped triplet data."},
++    )
+ 
+ 
+ @dataclass
+@@ -118,9 +279,23 @@ class TrainingArguments(transformers.TrainingArguments):
+     lora_dropout: float = 0.05
+     lora_weight_path: str = ""
+     lora_bias: str = "none"
++    lora_target_modules: Optional[str] = field(
++        default=None,
++        metadata={"help": "Optional comma-separated LoRA target module names. Defaults to GEM helper discovery."},
++    )
++    pure_lora_protocol: bool = field(
++        default=False,
++        metadata={
++            "help": (
++                "When LoRA is enabled, freeze every non-LoRA parameter after multimodal "
++                "module initialization. This keeps ecg_projector, mm_projector base layers, "
++                "and LLM base weights frozen while training only LoRA matrices."
++            )
++        },
++    )
+     mm_projector_lr: Optional[float] = None
+     group_by_modality_length: bool = field(default=False)
+-    attn_implementation: str = field(default="flash_attention_2", metadata={"help": "Use transformers attention implementation."})
++    attn_implementation: str = field(default=DEFAULT_ATTN_IMPLEMENTATION, metadata={"help": "Use transformers attention implementation."})
+ 
+ 
+ def maybe_zero_3(param, ignore_status=False, name=None):
+@@ -193,6 +368,237 @@ def find_all_linear_names(model):
+     return list(lora_module_names)
+ 
+ 
++def resolve_lora_target_modules(model, target_modules: Optional[str], pure_lora_protocol: bool):
++    if target_modules:
++        raw_targets = [module.strip() for module in target_modules.split(",") if module.strip()]
++    else:
++        raw_targets = []
++
++    aliases = {"llm_qkvo_mm_projector", "pure_llm_qkvo_mm_projector"}
++    if len(raw_targets) == 1 and raw_targets[0] in aliases:
++        num_layers = int(getattr(model.config, "num_hidden_layers", 32))
++        llm_targets = [
++            f"model.layers.{layer_idx}.self_attn.{proj}"
++            for layer_idx in range(num_layers)
++            for proj in ("q_proj", "k_proj", "v_proj", "o_proj")
++        ]
++        return llm_targets + ["model.mm_projector.0", "model.mm_projector.2"]
++
++    if raw_targets:
++        if pure_lora_protocol and any(target in {"q_proj", "k_proj", "v_proj", "o_proj"} for target in raw_targets):
++            raise RuntimeError(
++                "pure_lora_protocol forbids broad q/k/v/o LoRA targets because they also match "
++                "vision tower modules. Use --lora_target_modules llm_qkvo_mm_projector."
++            )
++        return raw_targets
++
++    if pure_lora_protocol:
++        raise RuntimeError(
++            "pure_lora_protocol requires --lora_target_modules llm_qkvo_mm_projector "
++            "or an explicit LLM-only target list."
++        )
++    return find_all_linear_names(model)
++
++
++def _is_allowed_pure_lora_name(name: str) -> bool:
++    if "lora_" not in name:
++        return False
++    if ".model.layers." in name and ".self_attn." in name:
++        return any(f".{proj}.lora_" in name for proj in ("q_proj", "k_proj", "v_proj", "o_proj"))
++    if ".mm_projector.0.lora_" in name or ".mm_projector.2.lora_" in name:
++        return True
++    return False
++
++
++def _set_requires_grad(module, requires_grad: bool):
++    if module is None:
++        return
++    for parameter in module.parameters():
++        parameter.requires_grad = requires_grad
++
++
++def configure_ecg_tower_trainability(ecg_tower, train_ecg_tower: bool, unlocked_groups: Optional[int]):
++    inner_tower = getattr(ecg_tower, "ecg_tower", ecg_tower)
++    _set_requires_grad(inner_tower, False)
++    if not train_ecg_tower:
++        return
++    if unlocked_groups is None:
++        _set_requires_grad(inner_tower, True)
++    elif unlocked_groups > 0 and hasattr(inner_tower, "lock"):
++        inner_tower.lock(unlocked_groups=unlocked_groups)
++    elif unlocked_groups > 0:
++        _set_requires_grad(inner_tower, True)
++
++
++def configure_vision_tower_trainability(vision_tower, train_vision_tower: bool, unlocked_layers: Optional[int]):
++    inner_tower = getattr(vision_tower, "vision_tower", vision_tower)
++    _set_requires_grad(inner_tower, False)
++    if not train_vision_tower:
++        return
++    if unlocked_layers is None:
++        _set_requires_grad(inner_tower, True)
++        return
++    if unlocked_layers <= 0:
++        return
++
++    vision_model = getattr(inner_tower, "vision_model", None)
++    if vision_model is None:
++        _set_requires_grad(inner_tower, True)
++        return
++
++    if hasattr(vision_model, "post_layernorm"):
++        _set_requires_grad(vision_model.post_layernorm, True)
++    encoder = getattr(vision_model, "encoder", None)
++    layers = list(getattr(encoder, "layers", [])) if encoder is not None else []
++    for layer in layers[-unlocked_layers:]:
++        _set_requires_grad(layer, True)
++
++
++def count_trainable_parameters(model):
++    trainable = 0
++    total = 0
++    for parameter in model.parameters():
++        total += parameter.numel()
++        if parameter.requires_grad:
++            trainable += parameter.numel()
++    return trainable, total
++
++
++def enforce_pure_lora_protocol(model):
++    """Freeze all non-LoRA parameters after GEM multimodal initialization.
++
++    GEM's initialize_ecg_modules/initialize_vision_modules intentionally set
++    projector parameters trainable in some paths. For pure-LoRA calibration we
++    must undo that and leave only LoRA A/B matrices trainable, including LoRA
++    modules attached to mm_projector.
++    """
++
++    trainable_names = []
++    frozen_projector_base_names = []
++    unexpected_trainable_names = []
++    unexpected_lora_names = []
++    for name, parameter in model.named_parameters():
++        if "lora_" in name:
++            if not _is_allowed_pure_lora_name(name):
++                unexpected_lora_names.append(name)
++            parameter.requires_grad = True
++            trainable_names.append(name)
++            continue
++        parameter.requires_grad = False
++        if "ecg_projector" in name or "mm_projector" in name:
++            frozen_projector_base_names.append(name)
++
++    for name, parameter in model.named_parameters():
++        if parameter.requires_grad and "lora_" not in name:
++            unexpected_trainable_names.append(name)
++
++    if unexpected_trainable_names:
++        preview = ", ".join(unexpected_trainable_names[:20])
++        raise RuntimeError(f"pure_lora_protocol violation: non-LoRA trainables remain: {preview}")
++    if unexpected_lora_names:
++        preview = ", ".join(unexpected_lora_names[:20])
++        raise RuntimeError(f"pure_lora_protocol violation: unexpected LoRA modules attached: {preview}")
++
++    projector_lora_names = [name for name in trainable_names if "mm_projector" in name]
++    llm_lora_names = [name for name in trainable_names if "self_attn" in name]
++    rank0_print(
++        "Pure LoRA protocol enforced: "
++        f"trainable_lora={len(trainable_names)}, "
++        f"llm_lora={len(llm_lora_names)}, "
++        f"mm_projector_lora={len(projector_lora_names)}, "
++        f"frozen_projector_base={len(frozen_projector_base_names)}"
++    )
++    return {
++        "trainable_lora_names": trainable_names,
++        "llm_lora_names": llm_lora_names,
++        "mm_projector_lora_names": projector_lora_names,
++        "frozen_projector_base_names": frozen_projector_base_names,
++    }
++
++
++def assert_pure_lora_non_lora_state_is_empty(non_lora_state_dict):
++    projector_keys = [
++        key
++        for key in non_lora_state_dict
++        if "ecg_projector" in key or "mm_projector" in key
++    ]
++    if projector_keys:
++        preview = ", ".join(projector_keys[:20])
++        raise RuntimeError(
++            "pure_lora_protocol violation: non_lora_trainables contains projector full weights: "
++            f"{preview}"
++        )
++
++
++def write_pure_lora_audit(model, training_args, audit_info, *, stage: str, non_lora_state_dict=None):
++    if not (training_args.local_rank == 0 or training_args.local_rank == -1):
++        return
++    if not getattr(training_args, "pure_lora_protocol", False):
++        return
++
++    trainable_params, total_params = count_trainable_parameters(model)
++    trainable_names = [name for name, parameter in model.named_parameters() if parameter.requires_grad]
++    lora_names = [name for name in trainable_names if "lora_" in name]
++    unexpected_trainable = [name for name in trainable_names if "lora_" not in name]
++    unexpected_lora = [name for name in lora_names if not _is_allowed_pure_lora_name(name)]
++    projector_base_trainable = [
++        name for name, parameter in model.named_parameters()
++        if parameter.requires_grad and ("ecg_projector" in name or "mm_projector" in name) and "lora_" not in name
++    ]
++    non_lora_keys = list((non_lora_state_dict or {}).keys())
++    non_lora_projector_keys = [
++        key for key in non_lora_keys
++        if "ecg_projector" in key or "mm_projector" in key
++    ]
++    payload = {
++        "stage": stage,
++        "pure_lora_protocol": True,
++        "lora_target_modules_arg": getattr(training_args, "lora_target_modules", None),
++        "expected_protocol": "LLM self-attn q/k/v/o LoRA + mm_projector.0/.2 LoRA only",
++        "trainable_params": int(trainable_params),
++        "total_params": int(total_params),
++        "trainable_percent": float(100.0 * trainable_params / max(total_params, 1)),
++        "trainable_module_names": trainable_names,
++        "lora_module_names": lora_names,
++        "llm_lora_module_names": (audit_info or {}).get("llm_lora_names", []),
++        "mm_projector_lora_module_names": (audit_info or {}).get("mm_projector_lora_names", []),
++        "frozen_projector_base_names": (audit_info or {}).get("frozen_projector_base_names", []),
++        "unexpected_trainable_names": unexpected_trainable,
++        "unexpected_lora_names": unexpected_lora,
++        "projector_base_trainable_names": projector_base_trainable,
++        "non_lora_trainables_key_count": len(non_lora_keys),
++        "non_lora_projector_keys": non_lora_projector_keys,
++        "status": "PASS" if not unexpected_trainable and not unexpected_lora and not projector_base_trainable and not non_lora_projector_keys else "FAIL",
++    }
++    os.makedirs(training_args.output_dir, exist_ok=True)
++    json_path = os.path.join(training_args.output_dir, "pure_lora_audit.json")
++    md_path = os.path.join(training_args.output_dir, "pure_lora_audit.md")
++    with open(json_path, "w", encoding="utf-8") as handle:
++        json.dump(payload, handle, indent=2, ensure_ascii=False)
++        handle.write("\n")
++    lines = [
++        "# Pure LoRA Audit",
++        "",
++        f"PURE_LORA_AUDIT_STATUS = {payload['status']}",
++        "",
++        f"- stage: `{stage}`",
++        f"- trainable params: `{trainable_params:,}` / `{total_params:,}` (`{payload['trainable_percent']:.3f}%`)",
++        f"- LoRA module count: `{len(lora_names)}`",
++        f"- unexpected trainable non-LoRA params: `{len(unexpected_trainable)}`",
++        f"- unexpected LoRA params: `{len(unexpected_lora)}`",
++        f"- trainable projector base params: `{len(projector_base_trainable)}`",
++        f"- non_lora_trainables projector keys: `{len(non_lora_projector_keys)}`",
++        "",
++        "## Trainable Modules",
++        "",
++    ]
++    lines.extend(f"- `{name}`" for name in trainable_names[:500])
++    if len(trainable_names) > 500:
++        lines.append(f"- ... truncated, total `{len(trainable_names)}`")
++    with open(md_path, "w", encoding="utf-8") as handle:
++        handle.write("\n".join(lines) + "\n")
++
++
+ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
+                                    output_dir: str):
+     """Collects the state dict and dump to disk."""
+@@ -746,6 +1152,217 @@ def get_tokenize_len(prompts):
+     return dict(input_ids=input_ids, labels=targets)
+ 
+ 
++def _load_ecg_tensor(sample: Dict[str, Any], data_args: DataArguments) -> torch.Tensor:
++    ecg_file = sample['ecg']
++    ecg_folder = data_args.ecg_folder
++    ecg = wfdb.rdsamp(os.path.join(ecg_folder, ecg_file))[0]
++    ecg[np.isnan(ecg)] = 0
++    ecg[np.isinf(ecg)] = 0
++    ecg = torch.Tensor(np.transpose(ecg, (1, 0)).astype(np.float32))
++    c, length = ecg.shape
++    seq_length = data_args.ecg_seq_length
++    if length < seq_length:
++        new_ecg = torch.zeros((c, seq_length))
++        new_ecg[:, 0:length] = ecg
++        ecg = new_ecg
++    elif length > seq_length:
++        ecg = ecg[:, 0:seq_length]
++    return ecg
++
++
++def _load_image_tensor(sample: Dict[str, Any], data_args: DataArguments, model_config):
++    image_file = sample['image']
++    image_folder = data_args.image_folder
++    processor = data_args.image_processor
++    image = Image.open(os.path.join(image_folder, image_file)).convert('RGB')
++    image_size = image.size
++    assert data_args.image_aspect_ratio in ['pad', 'anyres', 'ori']
++    if data_args.image_aspect_ratio == 'pad':
++        def expand2square(pil_img, background_color):
++            width, height = pil_img.size
++            if width == height:
++                return pil_img
++            elif width > height:
++                result = Image.new(pil_img.mode, (width, width), background_color)
++                result.paste(pil_img, (0, (width - height) // 2))
++                return result
++            else:
++                result = Image.new(pil_img.mode, (height, height), background_color)
++                result.paste(pil_img, ((height - width) // 2, 0))
++                return result
++        image = expand2square(image, tuple(int(x*255) for x in processor.image_mean))
++        image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
++    elif data_args.image_aspect_ratio == 'anyres':
++        image = process_anyres_image(image, processor, model_config.image_grid_pinpoints)
++    else:
++        image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
++    return image, image_size
++
++
++def _materialize_supervised_sample(
++    sample: Dict[str, Any],
++    tokenizer: transformers.PreTrainedTokenizer,
++    data_args: DataArguments,
++    model_config,
++    cached_ecg: Optional[torch.Tensor] = None,
++    cached_image: Optional[torch.Tensor] = None,
++    cached_image_size: Optional[tuple] = None,
++) -> Dict[str, torch.Tensor]:
++    sources = [sample]
++    if 'image' in sample:
++        if cached_ecg is not None and cached_image is not None and cached_image_size is not None:
++            ecg = cached_ecg
++            image = cached_image
++            image_size = cached_image_size
++        else:
++            ecg = _load_ecg_tensor(sample, data_args)
++            image, image_size = _load_image_tensor(sample, data_args, model_config)
++        sources = preprocess_multimodal(
++            copy.deepcopy([e["conversations"] for e in sources]),
++            data_args)
++    else:
++        sources = copy.deepcopy([e["conversations"] for e in sources])
++
++    data_dict = preprocess(
++        sources,
++        tokenizer,
++        has_image=('image' in sample))
++    data_dict = dict(input_ids=data_dict["input_ids"][0],
++                     labels=data_dict["labels"][0])
++
++    if 'image' in sample:
++        data_dict['ecg'] = ecg
++        data_dict['image'] = image
++        data_dict['image_size'] = image_size
++    elif data_args.is_multimodal:
++        data_dict['ecg'] = torch.zeros(12, 5000)
++        crop_size = data_args.image_processor.crop_size
++        data_dict['image'] = torch.zeros(3, crop_size['height'], crop_size['width'])
++    return data_dict
++
++
++def _triplet_layouts(data_args: DataArguments) -> List[str]:
++    return [layout.strip() for layout in data_args.grouped_triplet_layouts.split(",") if layout.strip()]
++
++
++def _layout_image_from_group(group: Dict[str, Any], layout: str) -> str:
++    layouts = group.get("layouts") or {}
++    if layout in layouts:
++        value = layouts[layout]
++        if isinstance(value, dict):
++            return value.get("image") or value.get("image_relpath") or value.get("image_path")
++        return value
++    return (
++        group.get(f"image_relpath_{layout}")
++        or group.get(f"image_path_{layout}")
++        or group.get(f"image_{layout}")
++    )
++
++
++def _answer_candidates_from_metadata(metadata: Dict[str, Any]) -> List[str]:
++    raw = metadata.get("candidate_answers")
++    if raw is None:
++        raw = metadata.get("candidate_answer_strings")
++    if isinstance(raw, str):
++        try:
++            raw = json.loads(raw)
++        except json.JSONDecodeError:
++            raw = [part.strip() for part in raw.split("|")]
++    if not isinstance(raw, (list, tuple)):
++        return []
++    candidates = []
++    seen = set()
++    for value in raw:
++        text = str(value).strip()
++        key = text.lower()
++        if text and key not in seen:
++            candidates.append(text)
++            seen.add(key)
++    return candidates
++
++
++def _to_bool(value: Any) -> bool:
++    if isinstance(value, bool):
++        return value
++    if value is None:
++        return False
++    if isinstance(value, (int, float)):
++        return bool(value)
++    return str(value).strip().lower() in {"1", "true", "yes", "y"}
++
++
++def _anchor_ecg_enabled(data_args: DataArguments) -> bool:
++    return bool(getattr(data_args, "anchor_ecg_enable", False) or getattr(data_args, "targetmargin_enable", False))
++
++
++def _first_human_turn(conversations: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
++    for conv in conversations or []:
++        role = conv.get("from") or conv.get("role")
++        if role in ("human", "user"):
++            return copy.deepcopy(conv)
++    return None
++
++
++def _candidate_conversation_with_answer(
++    conversations: Sequence[Dict[str, Any]],
++    candidate_answer: str,
++) -> Optional[List[Dict[str, Any]]]:
++    """Preserve prompt context and replace only the first assistant answer."""
++    output = []
++    for conv in conversations or []:
++        copied = copy.deepcopy(conv)
++        role = copied.get("from") or copied.get("role")
++        if role in ("gpt", "assistant"):
++            if "value" in copied:
++                copied["value"] = str(candidate_answer)
++            else:
++                copied["content"] = str(candidate_answer)
++            output.append(copied)
++            return output
++        output.append(copied)
++
++    human_conv = _first_human_turn(conversations)
++    if human_conv is None:
++        return None
++    return [human_conv, {"from": "gpt", "value": str(candidate_answer)}]
++
++
++def _anchor_ecg_info(sample: Dict[str, Any], data_args: DataArguments) -> Dict[str, Any]:
++    metadata = dict(sample.get("metadata") or {})
++    candidates = _answer_candidates_from_metadata(metadata)
++    candidate_max = getattr(data_args, "anchor_ecg_candidate_max", None)
++    if candidate_max is not None and int(candidate_max) > 0:
++        candidates = candidates[: int(candidate_max)]
++    target_idx = metadata.get("target_candidate_idx", metadata.get("target_answer_id", -1))
++    try:
++        target_idx = int(target_idx)
++    except (TypeError, ValueError):
++        target_idx = -1
++    bind_eligible = _to_bool(metadata.get("bind_eligible", sample.get("bind_eligible")))
++    strict = bool(getattr(data_args, "anchor_ecg_strict_eligibility", True))
++    valid = bool(candidates) and len(candidates) >= 2 and 0 <= target_idx < len(candidates)
++    eligible = valid and (bind_eligible or not strict)
++    skip_reason = None
++    if not bind_eligible and strict:
++        skip_reason = "bind_eligible_false"
++    elif len(candidates) < 2:
++        skip_reason = "candidate_count_lt_2"
++    elif target_idx < 0 or target_idx >= len(candidates):
++        skip_reason = "invalid_target_candidate_idx"
++    elif not valid:
++        skip_reason = "invalid_bind_metadata"
++    return {
++        "anchor_ecg_active_eligible": bool(eligible),
++        "candidate_answer_strings": candidates,
++        "target_answer_index": target_idx if valid else -1,
++        "answer_space_size": len(candidates) if valid else 0,
++        "skip_reason": skip_reason,
++        "train_group_id": metadata.get("train_group_id"),
++        "render_group_key": metadata.get("render_group_key"),
++        "layout_name": metadata.get("layout_name") or metadata.get("layout"),
++    }
++
++
+ class LazySupervisedDataset(Dataset):
+     """Dataset for supervised fine-tuning."""
+ 
+@@ -754,107 +1371,274 @@ def __init__(self, data_path: str,
+                  data_args: DataArguments,
+                  model_config):
+         super(LazySupervisedDataset, self).__init__()
+-        list_data_dict = json.load(open(data_path, "r"))
++        list_data_dict = load_json_or_jsonl(data_path)
+ 
+         rank0_print("Formatting inputs...Skip in lazy mode")
+         self.tokenizer = tokenizer
+         self.list_data_dict = list_data_dict
+         self.data_args = data_args
+         self.model_config = model_config
++        self._lengths_cache = None
++        self._modality_lengths_cache = None
+ 
+     def __len__(self):
+         return len(self.list_data_dict)
+ 
+     @property
+     def lengths(self):
++        if self._lengths_cache is not None:
++            return self._lengths_cache
+         length_list = []
+         for sample in self.list_data_dict:
+             img_tokens = 128 if 'image' in sample else 0
+             length_list.append(sum(len(conv['value'].split()) for conv in sample['conversations']) + img_tokens)
++        self._lengths_cache = length_list
+         return length_list
+ 
+     @property
+     def modality_lengths(self):
++        if self._modality_lengths_cache is not None:
++            return self._modality_lengths_cache
+         length_list = []
+         for sample in self.list_data_dict:
+             cur_len = sum(len(conv['value'].split()) for conv in sample['conversations'])
+             cur_len = cur_len if 'image' in sample else -cur_len
+             length_list.append(cur_len)
++        self._modality_lengths_cache = length_list
+         return length_list
+ 
+     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
+-        sources = self.list_data_dict[i]
+-        if isinstance(i, int):
+-            sources = [sources]
+-        assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
+-        if 'image' in sources[0]:
+-            #! read ecg files
+-            ecg_file = self.list_data_dict[i]['ecg']
+-            ecg_folder = self.data_args.ecg_folder
+-            ecg = wfdb.rdsamp(os.path.join(ecg_folder, ecg_file))[0]
+-            ecg[np.isnan(ecg)] = 0
+-            ecg[np.isinf(ecg)] = 0
+-            ecg = torch.Tensor(np.transpose(ecg, (1, 0)).astype(np.float32))
+-            c, length = ecg.shape
+-            seq_length = self.data_args.ecg_seq_length
+-            if length < seq_length:
+-                new_ecg = torch.zeros((c, seq_length))
+-                new_ecg[:, 0:length] = ecg
+-                ecg = new_ecg
+-            elif length > seq_length:
+-                ecg = ecg[:, 0:seq_length]     
+-
+-            #! read image files
+-            image_file = self.list_data_dict[i]['image']
+-            image_folder = self.data_args.image_folder
+-            processor = self.data_args.image_processor
+-            image = Image.open(os.path.join(image_folder, image_file)).convert('RGB')
+-            image_size = image.size
+-            assert self.data_args.image_aspect_ratio in ['pad', 'anyres', 'ori']
+-            if self.data_args.image_aspect_ratio == 'pad':
+-                def expand2square(pil_img, background_color):
+-                    width, height = pil_img.size
+-                    if width == height:
+-                        return pil_img
+-                    elif width > height:
+-                        result = Image.new(pil_img.mode, (width, width), background_color)
+-                        result.paste(pil_img, (0, (width - height) // 2))
+-                        return result
+-                    else:
+-                        result = Image.new(pil_img.mode, (height, height), background_color)
+-                        result.paste(pil_img, ((height - width) // 2, 0))
+-                        return result
+-                image = expand2square(image, tuple(int(x*255) for x in processor.image_mean))
+-                image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
+-            elif self.data_args.image_aspect_ratio == 'anyres':
+-                image = process_anyres_image(image, processor, self.model_config.image_grid_pinpoints)
++        sample = self.list_data_dict[i]
++        base = _materialize_supervised_sample(
++            sample=sample,
++            tokenizer=self.tokenizer,
++            data_args=self.data_args,
++            model_config=self.model_config,
++        )
++        if not _anchor_ecg_enabled(self.data_args):
++            return base
++
++        anchor_info = _anchor_ecg_info(sample, self.data_args)
++        base["anchor_ecg"] = anchor_info
++        candidate_instances = []
++        if anchor_info["anchor_ecg_active_eligible"]:
++            source_conversations = sample.get("conversations") or []
++            if _first_human_turn(source_conversations) is None:
++                anchor_info["anchor_ecg_active_eligible"] = False
++                anchor_info["skip_reason"] = "missing_human_turn"
+             else:
+-                # assert False
+-                image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
+-            sources = preprocess_multimodal(
+-                copy.deepcopy([e["conversations"] for e in sources]),
+-                self.data_args)
+-        else:
+-            sources = copy.deepcopy([e["conversations"] for e in sources])
+-        data_dict = preprocess(
+-            sources,
+-            self.tokenizer,
+-            has_image=('image' in self.list_data_dict[i]))
+-        if isinstance(i, int):
+-            data_dict = dict(input_ids=data_dict["input_ids"][0],
+-                             labels=data_dict["labels"][0])
+-
+-        # image exist in the data
+-        if 'image' in self.list_data_dict[i]:
+-            data_dict['ecg'] = ecg
+-            data_dict['image'] = image
+-            data_dict['image_size'] = image_size
+-        elif self.data_args.is_multimodal:
+-            data_dict['ecg'] = torch.zeros(12, 5000)
+-            # image does not exist in the data, but the model is multimodal
+-            crop_size = self.data_args.image_processor.crop_size
+-            data_dict['image'] = torch.zeros(3, crop_size['height'], crop_size['width'])
+-        return data_dict
++                for answer_idx, candidate in enumerate(anchor_info["candidate_answer_strings"]):
++                    candidate_conversations = _candidate_conversation_with_answer(source_conversations, str(candidate))
++                    if candidate_conversations is None:
++                        continue
++                    candidate_sample = {
++                        "id": f"{sample.get('id', i)}::anchor_candidate{answer_idx}",
++                        "image": sample.get("image"),
++                        "ecg": sample.get("ecg"),
++                        "conversations": candidate_conversations,
++                        "metadata": {
++                            "anchor_candidate_answer_index": answer_idx,
++                            "source_id": sample.get("id"),
++                        },
++                    }
++                    candidate_instances.append(
++                        _materialize_supervised_sample(
++                            sample=candidate_sample,
++                            tokenizer=self.tokenizer,
++                            data_args=self.data_args,
++                            model_config=self.model_config,
++                            cached_ecg=base.get("ecg"),
++                            cached_image=base.get("image"),
++                            cached_image_size=base.get("image_size"),
++                        )
++                    )
++        base["anchor_ecg_candidate_instances"] = candidate_instances
++        return base
++
++
++class LazyGroupedTripletDataset(Dataset):
++    """Same-instruction, same-signal three-layout SFT dataset."""
++
++    def __init__(self, data_path: str,
++                 tokenizer: transformers.PreTrainedTokenizer,
++                 data_args: DataArguments,
++                 model_config):
++        super(LazyGroupedTripletDataset, self).__init__()
++        list_data_dict = load_json_or_jsonl(data_path)
++
++        rank0_print("Formatting grouped triplet inputs...Skip in lazy mode")
++        self.tokenizer = tokenizer
++        self.list_data_dict = list_data_dict
++        self.data_args = data_args
++        self.model_config = model_config
++        self.layouts = _triplet_layouts(data_args)
++        self._lengths_cache = None
++        self._modality_lengths_cache = None
++
++    def __len__(self):
++        return len(self.list_data_dict)
++
++    @property
++    def lengths(self):
++        if self._lengths_cache is not None:
++            return self._lengths_cache
++        length_list = []
++        for sample in self.list_data_dict:
++            img_tokens = 128 * len(self.layouts)
++            length_list.append(sum(len(conv['value'].split()) for conv in sample['conversations']) + img_tokens)
++        self._lengths_cache = length_list
++        return length_list
++
++    @property
++    def modality_lengths(self):
++        if self._modality_lengths_cache is not None:
++            return self._modality_lengths_cache
++        length_list = []
++        for sample in self.list_data_dict:
++            cur_len = sum(len(conv['value'].split()) for conv in sample['conversations'])
++            length_list.append(cur_len)
++        self._modality_lengths_cache = length_list
++        return length_list
++
++    def __getitem__(self, i) -> Dict[str, Any]:
++        group = self.list_data_dict[i]
++        instances = []
++        layout_images = {}
++        for layout in self.layouts:
++            image = _layout_image_from_group(group, layout)
++            if not image:
++                raise ValueError(f"Missing image for layout {layout} in grouped row {group.get('id') or group.get('group_key')}")
++            layout_images[layout] = image
++            metadata = dict(group.get("metadata") or {})
++            metadata.update({
++                "layout_name": layout,
++                "group_key": group.get("group_key") or metadata.get("group_key"),
++                "signal_key": group.get("signal_key") or metadata.get("signal_key"),
++            })
++            sample = {
++                "id": f"{group.get('id') or group.get('group_key')}::{layout}",
++                "image": image,
++                "ecg": group["ecg"],
++                "conversations": copy.deepcopy(group["conversations"]),
++                "metadata": metadata,
++            }
++            instances.append(_materialize_supervised_sample(
++                sample=sample,
++                tokenizer=self.tokenizer,
++                data_args=self.data_args,
++                model_config=self.model_config,
++            ))
++        item = {
++            "triplet_instances": instances,
++            "group_key": group.get("group_key") or group.get("id"),
++            "layout_names": list(self.layouts),
++        }
++
++        if self.data_args.layoutbind_enable:
++            layoutbind = infer_layoutbind_answer_space(group)
++            tier = str(getattr(self.data_args, "layoutbind_eligibility_tier", "strict") or "strict").lower()
++            active_eligible = is_layoutbind_tier_eligible(layoutbind, tier)
++            layoutbind["layoutbind_eligibility_tier"] = tier
++            layoutbind["layoutbind_active_eligible"] = bool(active_eligible)
++            item["layoutbind"] = layoutbind
++            candidate_instances = []
++            if active_eligible:
++                prompt, _ = None, None
++                conversations = group.get("conversations") or []
++                human_conv = None
++                for conv in conversations:
++                    role = conv.get("from") or conv.get("role")
++                    if role in ("human", "user"):
++                        human_conv = copy.deepcopy(conv)
++                        break
++                if human_conv is not None:
++                    for layout_idx, layout in enumerate(self.layouts):
++                        for answer_idx, candidate in enumerate(layoutbind.get("candidate_answer_strings") or []):
++                            sample = {
++                                "id": f"{group.get('id') or group.get('group_key')}::{layout}::candidate{answer_idx}",
++                                "image": layout_images[layout],
++                                "ecg": group["ecg"],
++                                "conversations": [
++                                    copy.deepcopy(human_conv),
++                                    {"from": "gpt", "value": str(candidate)},
++                                ],
++                                "metadata": {
++                                    "layout_name": layout,
++                                    "layout_index": layout_idx,
++                                    "answer_index": answer_idx,
++                                    "group_key": group.get("group_key") or group.get("id"),
++                                },
++                            }
++                            candidate_instances.append({
++                                "layout_index": layout_idx,
++                                "answer_index": answer_idx,
++                                "instance": _materialize_supervised_sample(
++                                    sample=sample,
++                                    tokenizer=self.tokenizer,
++                                    data_args=self.data_args,
++                                    model_config=self.model_config,
++                                    cached_ecg=instances[layout_idx]["ecg"],
++                                    cached_image=instances[layout_idx]["image"],
++                                    cached_image_size=instances[layout_idx]["image_size"],
++                                ),
++                            })
++            item["layoutbind_candidate_instances"] = candidate_instances
++        return item
++
++
++class LazyMixedGroupedRetentionDataset(Dataset):
++    """Grouped triplet bind data plus fixed SFT-only retention replay rows."""
++
++    def __init__(self, data_path: str,
++                 retention_data_path: str,
++                 tokenizer: transformers.PreTrainedTokenizer,
++                 data_args: DataArguments,
++                 model_config):
++        super(LazyMixedGroupedRetentionDataset, self).__init__()
++        self.bind_dataset = LazyGroupedTripletDataset(
++            data_path=data_path,
++            tokenizer=tokenizer,
++            data_args=data_args,
++            model_config=model_config,
++        )
++        retention_args = copy.copy(data_args)
++        retention_args.layoutbind_enable = False
++        self.retention_dataset = LazySupervisedDataset(
++            data_path=retention_data_path,
++            tokenizer=tokenizer,
++            data_args=retention_args,
++            model_config=model_config,
++        )
++        self.data_args = data_args
++        self.retention_count = len(self.retention_dataset)
++        self._lengths_cache = None
++        self._modality_lengths_cache = None
++
++    def __len__(self):
++        return len(self.bind_dataset)
++
++    @property
++    def lengths(self):
++        if self._lengths_cache is not None:
++            return self._lengths_cache
++        self._lengths_cache = list(self.bind_dataset.lengths)
++        return self._lengths_cache
++
++    @property
++    def modality_lengths(self):
++        if self._modality_lengths_cache is not None:
++            return self._modality_lengths_cache
++        self._modality_lengths_cache = list(self.bind_dataset.modality_lengths)
++        return self._modality_lengths_cache
++
++    def __getitem__(self, i) -> Dict[str, Any]:
++        item = self.bind_dataset[i]
++        item["sample_type"] = "bind_grouped"
++        if i < self.retention_count:
++            retention = self.retention_dataset[i]
++            retention["sample_type"] = "retention_replay"
++            item["retention_instance"] = retention
++        return item
+ 
+ 
+ @dataclass
+@@ -872,6 +1656,101 @@ def pad_sequence(self, input_ids, batch_first, padding_value):
+         return input_ids
+ 
+     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
++        if instances and any('triplet_instances' in instance for instance in instances):
++            grouped_instances = [instance for instance in instances if 'triplet_instances' in instance]
++            retention_instances = []
++            for instance in grouped_instances:
++                if "retention_instance" in instance:
++                    retention_instances.append(instance["retention_instance"])
++            retention_instances.extend(instance for instance in instances if 'triplet_instances' not in instance)
++            if not grouped_instances:
++                raise ValueError("Internal collator error: expected grouped instances.")
++
++            group_size = len(grouped_instances[0]['triplet_instances'])
++            flat_instances = []
++            for instance in grouped_instances:
++                if len(instance['triplet_instances']) != group_size:
++                    raise ValueError("All grouped triplet items must have the same number of layouts.")
++                flat_instances.extend(instance['triplet_instances'])
++            candidate_flat = []
++            candidate_group_indices = []
++            candidate_layout_indices = []
++            candidate_answer_indices = []
++            eligible = []
++            target_ids = []
++            answer_sizes = []
++            if any('layoutbind' in instance for instance in grouped_instances):
++                for group_idx, instance in enumerate(grouped_instances):
++                    layoutbind = instance.get("layoutbind") or {}
++                    is_eligible = bool(layoutbind.get("layoutbind_active_eligible", layoutbind.get("targetbind_eligible")))
++                    candidates = instance.get("layoutbind_candidate_instances") or []
++                    answer_space = layoutbind.get("candidate_answer_strings") or []
++                    eligible.append(is_eligible and bool(candidates))
++                    target_ids.append(int(layoutbind.get("target_answer_id")) if is_eligible and layoutbind.get("target_answer_id") is not None else -1)
++                    answer_sizes.append(len(answer_space) if is_eligible else 0)
++                    for candidate in candidates:
++                        candidate_flat.append(candidate["instance"])
++                        candidate_group_indices.append(group_idx)
++                        candidate_layout_indices.append(int(candidate["layout_index"]))
++                        candidate_answer_indices.append(int(candidate["answer_index"]))
++
++            all_flat_instances = flat_instances + retention_instances + candidate_flat
++            batch = self.__call__(all_flat_instances)
++            batch['triplet_group_size'] = torch.tensor(group_size, dtype=torch.long)
++            batch['triplet_num_groups'] = torch.tensor(len(grouped_instances), dtype=torch.long)
++            batch['retention_num_samples'] = torch.tensor(len(retention_instances), dtype=torch.long)
++            batch['layoutbind_candidate_count'] = torch.tensor(len(candidate_flat), dtype=torch.long)
++            if any('layoutbind' in instance for instance in grouped_instances):
++                batch['layoutbind_group_eligible'] = torch.tensor(eligible, dtype=torch.bool)
++                batch['layoutbind_group_target_answer_index'] = torch.tensor(target_ids, dtype=torch.long)
++                batch['layoutbind_group_answer_space_size'] = torch.tensor(answer_sizes, dtype=torch.long)
++                if candidate_flat:
++                    batch['layoutbind_candidate_group_index'] = torch.tensor(candidate_group_indices, dtype=torch.long)
++                    batch['layoutbind_candidate_layout_index'] = torch.tensor(candidate_layout_indices, dtype=torch.long)
++                    batch['layoutbind_candidate_answer_index'] = torch.tensor(candidate_answer_indices, dtype=torch.long)
++            return batch
++
++        if instances and any('anchor_ecg' in instance for instance in instances):
++            base_instances = []
++            candidate_flat = []
++            candidate_row_indices = []
++            candidate_answer_indices = []
++            row_eligible = []
++            target_ids = []
++            answer_sizes = []
++            skipped = 0
++            for row_idx, instance in enumerate(instances):
++                base = {
++                    key: value for key, value in instance.items()
++                    if key not in {"anchor_ecg", "anchor_ecg_candidate_instances"}
++                }
++                base_instances.append(base)
++                anchor = instance.get("anchor_ecg") or {}
++                candidates = instance.get("anchor_ecg_candidate_instances") or []
++                is_eligible = bool(anchor.get("anchor_ecg_active_eligible")) and bool(candidates)
++                row_eligible.append(is_eligible)
++                target_ids.append(int(anchor.get("target_answer_index", -1)) if is_eligible else -1)
++                answer_sizes.append(int(anchor.get("answer_space_size", 0)) if is_eligible else 0)
++                if not is_eligible:
++                    skipped += 1
++                    continue
++                for answer_idx, candidate_instance in enumerate(candidates):
++                    candidate_flat.append(candidate_instance)
++                    candidate_row_indices.append(row_idx)
++                    candidate_answer_indices.append(answer_idx)
++
++            batch = self.__call__(base_instances + candidate_flat)
++            batch['anchor_ecg_base_count'] = torch.tensor(len(base_instances), dtype=torch.long)
++            batch['anchor_ecg_candidate_count'] = torch.tensor(len(candidate_flat), dtype=torch.long)
++            batch['anchor_ecg_row_eligible'] = torch.tensor(row_eligible, dtype=torch.bool)
++            batch['anchor_ecg_row_target_answer_index'] = torch.tensor(target_ids, dtype=torch.long)
++            batch['anchor_ecg_row_answer_space_size'] = torch.tensor(answer_sizes, dtype=torch.long)
++            batch['anchor_ecg_rows_skipped'] = torch.tensor(skipped, dtype=torch.long)
++            if candidate_flat:
++                batch['anchor_ecg_candidate_row_index'] = torch.tensor(candidate_row_indices, dtype=torch.long)
++                batch['anchor_ecg_candidate_answer_index'] = torch.tensor(candidate_answer_indices, dtype=torch.long)
++            return batch
++
+         input_ids, labels = tuple([instance[key] for instance in instances]
+                                   for key in ("input_ids", "labels"))
+ 
+@@ -912,10 +1791,20 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
+                                 data_args,
+                                 model_config) -> Dict:
+     """Make dataset and collator for supervised fine-tuning."""
+-    train_dataset = LazySupervisedDataset(tokenizer=tokenizer,
+-                                data_path=data_args.data_path,
+-                                data_args=data_args,
+-                                model_config=model_config)
++    if data_args.grouped_triplet_training and data_args.retention_data_path:
++        train_dataset = LazyMixedGroupedRetentionDataset(
++            tokenizer=tokenizer,
++            data_path=data_args.data_path,
++            retention_data_path=data_args.retention_data_path,
++            data_args=data_args,
++            model_config=model_config,
++        )
++    else:
++        dataset_cls = LazyGroupedTripletDataset if data_args.grouped_triplet_training else LazySupervisedDataset
++        train_dataset = dataset_cls(tokenizer=tokenizer,
++                                    data_path=data_args.data_path,
++                                    data_args=data_args,
++                                    model_config=model_config)
+     data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
+     return dict(train_dataset=train_dataset,
+                 eval_dataset=None,
+@@ -928,12 +1817,35 @@ def train(attn_implementation=None):
+     parser = transformers.HfArgumentParser(
+         (ModelArguments, DataArguments, TrainingArguments))
+     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
++    if data_args.targetmargin_enable and not data_args.anchor_ecg_enable:
++        data_args.anchor_ecg_enable = True
++        data_args.anchor_ecg_rowwise = data_args.targetmargin_rowwise
++        data_args.anchor_ecg_lambda_margin = data_args.targetmargin_lambda
++        data_args.anchor_ecg_margin_delta = data_args.targetmargin_delta
++        data_args.anchor_ecg_length_normalize = data_args.targetmargin_length_normalize
++        data_args.anchor_ecg_strict_eligibility = data_args.targetmargin_strict_eligibility
++    elif data_args.anchor_ecg_enable:
++        data_args.targetmargin_enable = True
++        data_args.targetmargin_rowwise = data_args.anchor_ecg_rowwise
++        data_args.targetmargin_lambda = data_args.anchor_ecg_lambda_margin
++        data_args.targetmargin_delta = data_args.anchor_ecg_margin_delta
++        data_args.targetmargin_length_normalize = data_args.anchor_ecg_length_normalize
++        data_args.targetmargin_strict_eligibility = data_args.anchor_ecg_strict_eligibility
++
++    if data_args.anchor_ecg_enable and data_args.layoutbind_enable:
++        raise RuntimeError("TRACE-ECG and legacy LayoutBind/TargetBind cannot be enabled together.")
++    if data_args.layoutbind_enable and not data_args.grouped_triplet_training:
++        raise RuntimeError("legacy LayoutBind requires --grouped_triplet_training True.")
++    if data_args.anchor_ecg_enable and not data_args.anchor_ecg_rowwise:
++        raise RuntimeError("The main TRACE-ECG implementation currently supports row-wise TargetMargin only.")
+     local_rank = training_args.local_rank
+     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
++    resolved_attn_implementation = attn_implementation or training_args.attn_implementation
+ 
+     bnb_model_from_pretrained_args = {}
+     customized_kwargs = dict()
+     customized_kwargs.update(bnb_model_from_pretrained_args)
++    pure_lora_audit_info = None
+ 
+     if training_args.bits in [4, 8]:
+         from transformers import BitsAndBytesConfig
+@@ -968,7 +1880,7 @@ def train(attn_implementation=None):
+                 model = LlavaQwenMoeForCausalLM.from_pretrained(
+                     model_args.model_name_or_path,
+                     cache_dir=training_args.cache_dir,
+-                    attn_implementation=training_args.attn_implementation,
++                    attn_implementation=resolved_attn_implementation,
+                     torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
+                     low_cpu_mem_usage=False,
+                     **customized_kwargs,
+@@ -980,7 +1892,7 @@ def train(attn_implementation=None):
+                 model = LlavaQwenForCausalLM.from_pretrained(
+                     model_args.model_name_or_path,
+                     cache_dir=training_args.cache_dir,
+-                    attn_implementation=training_args.attn_implementation,
++                    attn_implementation=resolved_attn_implementation,
+                     torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
+                     low_cpu_mem_usage=False,
+                     **customized_kwargs,
+@@ -989,7 +1901,7 @@ def train(attn_implementation=None):
+             model = LlavaLlamaForCausalLM.from_pretrained(
+                 model_args.model_name_or_path,
+                 cache_dir=training_args.cache_dir,
+-                attn_implementation=attn_implementation,
++                attn_implementation=resolved_attn_implementation,
+                 torch_dtype=(torch.bfloat16 if training_args.bf16 else torch.float16),
+                 **bnb_model_from_pretrained_args
+             )
+@@ -997,7 +1909,7 @@ def train(attn_implementation=None):
+         model = transformers.LlamaForCausalLM.from_pretrained(
+             model_args.model_name_or_path,
+             cache_dir=training_args.cache_dir,
+-            attn_implementation=attn_implementation,
++            attn_implementation=resolved_attn_implementation,
+             torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
+             **bnb_model_from_pretrained_args
+         )
+@@ -1021,10 +1933,15 @@ def make_inputs_require_grad(module, input, output):
+ 
+     if training_args.lora_enable:
+         from peft import LoraConfig, get_peft_model
++        lora_target_modules = resolve_lora_target_modules(
++            model,
++            training_args.lora_target_modules,
++            training_args.pure_lora_protocol,
++        )
+         lora_config = LoraConfig(
+             r=training_args.lora_r,
+             lora_alpha=training_args.lora_alpha,
+-            target_modules=find_all_linear_names(model),
++            target_modules=lora_target_modules,
+             lora_dropout=training_args.lora_dropout,
+             bias=training_args.lora_bias,
+             task_type="CAUSAL_LM",
+@@ -1114,6 +2031,49 @@ def make_inputs_require_grad(module, input, output):
+             for p in model.get_model().ecg_projector.parameters():
+                 p.requires_grad = False                
+ 
++        if model_args.train_mm_projector:
++            for p in model.get_model().mm_projector.parameters():
++                p.requires_grad = True
++
++        configure_ecg_tower_trainability(
++            model.get_ecg_tower(),
++            train_ecg_tower=model_args.train_ecg_tower,
++            unlocked_groups=model_args.ecg_tower_unlocked_groups,
++        )
++        configure_vision_tower_trainability(
++            model.get_vision_tower(),
++            train_vision_tower=model_args.train_vision_tower,
++            unlocked_layers=model_args.vision_tower_unlocked_layers,
++        )
++        if model_args.freeze_ecg_projector:
++            for p in model.get_model().ecg_projector.parameters():
++                p.requires_grad = False
++
++        if training_args.lora_enable and training_args.pure_lora_protocol:
++            if model_args.train_mm_projector:
++                raise RuntimeError("pure_lora_protocol forbids --train_mm_projector True")
++            if model_args.tune_mm_mlp_adapter:
++                raise RuntimeError("pure_lora_protocol forbids --tune_mm_mlp_adapter True")
++            if not training_args.lora_target_modules:
++                raise RuntimeError(
++                    "pure_lora_protocol requires explicit --lora_target_modules; "
++                    "expected llm_qkvo_mm_projector"
++                )
++            pure_lora_audit_info = enforce_pure_lora_protocol(model)
++
++        trainable_params, total_params = count_trainable_parameters(model)
++        rank0_print(
++            f"Trainable parameters: {trainable_params:,}/{total_params:,} "
++            f"({100.0 * trainable_params / max(total_params, 1):.2f}%)"
++        )
++        if training_args.lora_enable and training_args.pure_lora_protocol:
++            write_pure_lora_audit(
++                model,
++                training_args,
++                pure_lora_audit_info,
++                stage="startup_after_multimodal_init",
++            )
++
+         if training_args.bits in [4, 8]:
+             model.get_model().mm_projector.to(dtype=compute_dtype, device=training_args.device)
+             model.get_model().ecg_projector.to(dtype=compute_dtype, device=training_args.device)
+@@ -1147,6 +2107,9 @@ def make_inputs_require_grad(module, input, output):
+                     tokenizer=tokenizer,
+                     args=training_args,
+                     **data_module)
++    save_ratios = parse_save_ratios_from_env()
++    if save_ratios:
++        trainer.add_callback(SaveAtRatiosCallback(save_ratios))
+ 
+     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
+         print("Resuming from checkpoint...")
+@@ -1158,6 +2121,12 @@ def make_inputs_require_grad(module, input, output):
+ 
+     model.config.use_cache = True
+ 
++    skip_final_save = os.environ.get("GEM_SKIP_FINAL_SAVE", "0") == "1"
++    if skip_final_save:
++        if training_args.local_rank == 0 or training_args.local_rank == -1:
++            print("GEM_SKIP_FINAL_SAVE=1: skipping final model save after training.")
++        return
++
+     if training_args.lora_enable:
+         state_dict = get_peft_state_maybe_zero_3(
+             model.named_parameters(), training_args.lora_bias
+@@ -1165,7 +2134,17 @@ def make_inputs_require_grad(module, input, output):
+         non_lora_state_dict = get_peft_state_non_lora_maybe_zero_3(
+             model.named_parameters()
+         )
++        if training_args.pure_lora_protocol:
++            assert_pure_lora_non_lora_state_is_empty(non_lora_state_dict)
+         if training_args.local_rank == 0 or training_args.local_rank == -1:
++            if training_args.pure_lora_protocol:
++                write_pure_lora_audit(
++                    model,
++                    training_args,
++                    pure_lora_audit_info,
++                    stage="final_before_save",
++                    non_lora_state_dict=non_lora_state_dict,
++                )
+             model.config.save_pretrained(training_args.output_dir)
+             model.save_pretrained(training_args.output_dir, state_dict=state_dict)
+             torch.save(non_lora_state_dict, os.path.join(training_args.output_dir, 'non_lora_trainables.bin'))
+diff --git a/llava/train/train_mem.py b/llava/train/train_mem.py
+index 29ea061..6135ca4 100644
+--- a/llava/train/train_mem.py
++++ b/llava/train/train_mem.py
+@@ -1,4 +1,4 @@
+ from llava.train.train import train
+ 
+ if __name__ == "__main__":
+-    train(attn_implementation="flash_attention_2")
++    train()
+diff --git a/scripts/train_gem.sh b/scripts/train_gem.sh
+index b5dd555..ec7ece2 100644
+--- a/scripts/train_gem.sh
++++ b/scripts/train_gem.sh
+@@ -9,20 +9,20 @@ MASTER_PORT="1234"
+ WORLD_SIZE=$(($GPUS_PER_NODE * $NNODES))
+ 
+ # your huggingface configurations
+-export HF_HOME=""
++export HF_HOME="/data/download_cache/hf"
+ 
+-LLM_VERSION=""
++LLM_VERSION="/data/model_checkpoints/liuhaotian_llava-v1.6-vicuna-7b"
+ LLM_VERSION_CLEAN="${LLM_VERSION//\//_}"
+-DATA_VERSION=""
++DATA_VERSION="ECG_Grounding_30k"
+ BASE_RUN_NAME="GEM-${LLM_VERSION_CLEAN}-${DATA_VERSION}-finetune"
+ echo "BASE_RUN_NAME: ${BASE_RUN_NAME}"
+ 
+ version=llava_v1
+ 
+-data_path=""
+-image_folder=""
+-ecg_folder=""
+-ecg_tower=""
++data_path="/data/ecg_jsons/ECG_Grounding_30k.json"
++image_folder="/data/gem_official_images"
++ecg_folder="/data/ecg_timeseries"
++ecg_tower="/workspace/MJ/GEM/ecg_coca/open_clip/checkpoint/cpt_wfep_epoch_20.pt"
+ 
+ num_epochs=1
+ GRAD_ACC_STEP=2
+@@ -35,8 +35,8 @@ torchrun \
+     --node_rank $NODE_RANK \
+     --master_port $MASTER_PORT \
+     --nnodes $NNODES \
+-    ...your_path_to/train_mem.py \ 
+-    --deepspeed ...your_path_to/zero2.json \
++    /workspace/MJ/GEM/llava/train/train_mem.py \
++    --deepspeed /workspace/MJ/GEM/scripts/zero2.json \
+     --model_name_or_path ${LLM_VERSION} \
+     --version ${version} \
+     --data_path ${data_path} \
+@@ -71,4 +71,4 @@ torchrun \
+     --gradient_checkpointing True \
+     --dataloader_num_workers 64 \
+     --lazy_preprocess True \
+-    --report_to wandb
+\ No newline at end of file
++    --report_to wandb
+diff --git a/scripts/zero2.json b/scripts/zero2.json
+index b5ba7eb..465f5f4 100644
+--- a/scripts/zero2.json
++++ b/scripts/zero2.json
+@@ -10,15 +10,6 @@
+     "bf16": {
+         "enabled": "auto"
+     },
+-    "optimizer": {
+-        "type": "AdamW",
+-        "params": {
+-            "lr": "auto",
+-            "betas": "auto",
+-            "eps": "auto",
+-            "weight_decay": "auto"
+-        }
+-    },
+     "zero_optimization": {
+         "stage": 2,
+         "offload_optimizer": {
+@@ -38,4 +29,4 @@
+     "train_batch_size": "auto",
+     "train_micro_batch_size_per_gpu": "auto",
+     "wall_clock_breakdown": false
+-}
+\ No newline at end of file
++}
+diff --git a/setup.sh b/setup.sh
+index 56fca67..6b9629e 100644
+--- a/setup.sh
++++ b/setup.sh
+@@ -1,9 +1,103 @@
+-conda create -n gem python=3.10 -y
+-conda activate gem
+-pip install --upgrade pip  # enable PEP 660 support
+-pip install -e .
+-pip install -e ".[train]"
+-pip install flash-attn --no-build-isolation
+-pip install ftfy
+-pip install wfdb
+-pip install peft==0.10.0
+\ No newline at end of file
++#!/usr/bin/env bash
++set -euo pipefail
++
++REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++cd "$REPO_ROOT"
++
++ENV_NAME="${GEM_ENV_NAME:-gem}"
++PYTHON_VERSION="${GEM_PYTHON_VERSION:-3.10}"
++CUDA_LABEL="${GEM_CUDA_LABEL:-cuda-12.8.0}"
++TORCH_VERSION="${GEM_TORCH_VERSION:-2.7.0}"
++TORCHVISION_VERSION="${GEM_TORCHVISION_VERSION:-0.22.0}"
++TORCHAUDIO_VERSION="${GEM_TORCHAUDIO_VERSION:-2.7.0}"
++PYTORCH_INDEX_URL="${GEM_PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
++INSTALL_TRAIN_DEPS="${GEM_INSTALL_TRAIN_DEPS:-1}"
++INSTALL_BITSANDBYTES="${GEM_INSTALL_BITSANDBYTES:-0}"
++
++set +u
++source "$(conda info --base)/etc/profile.d/conda.sh"
++export CC="${CC:-gcc}"
++export CXX="${CXX:-g++}"
++export CFLAGS="${CFLAGS:-}"
++export CPPFLAGS="${CPPFLAGS:-}"
++export CXXFLAGS="${CXXFLAGS:-}"
++export LDFLAGS="${LDFLAGS:-}"
++export NVCC_PREPEND_FLAGS="${NVCC_PREPEND_FLAGS:-}"
++export NVCC_APPEND_FLAGS="${NVCC_APPEND_FLAGS:-}"
++
++if ! conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
++    conda create -n "$ENV_NAME" -y "python=${PYTHON_VERSION}"
++fi
++
++conda activate "$ENV_NAME"
++conda install -y -c "nvidia/label/${CUDA_LABEL}" cuda
++set -u
++
++mkdir -p "$CONDA_PREFIX/etc/conda/activate.d" "$CONDA_PREFIX/etc/conda/deactivate.d"
++cat > "$CONDA_PREFIX/etc/conda/activate.d/gem_cuda.sh" <<'EOF'
++export CUDA_HOME="$CONDA_PREFIX"
++export _GEM_OLD_LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
++export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$CONDA_PREFIX/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
++EOF
++cat > "$CONDA_PREFIX/etc/conda/deactivate.d/gem_cuda.sh" <<'EOF'
++export LD_LIBRARY_PATH="${_GEM_OLD_LD_LIBRARY_PATH:-}"
++unset _GEM_OLD_LD_LIBRARY_PATH
++unset CUDA_HOME
++EOF
++
++export CUDA_HOME="$CONDA_PREFIX"
++export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$CONDA_PREFIX/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
++
++python -m pip install --upgrade pip setuptools wheel
++python -m pip install --index-url "$PYTORCH_INDEX_URL" \
++    "torch==${TORCH_VERSION}" \
++    "torchvision==${TORCHVISION_VERSION}" \
++    "torchaudio==${TORCHAUDIO_VERSION}"
++
++python -m pip install \
++    "transformers==4.37.2" \
++    "tokenizers==0.15.1" \
++    "sentencepiece==0.1.99" \
++    "shortuuid" \
++    "accelerate==0.21.0" \
++    "peft==0.10.0" \
++    "pydantic" \
++    "markdown2[all]" \
++    "numpy<2" \
++    "scikit-learn==1.2.2" \
++    "gradio==4.16.0" \
++    "gradio_client==0.8.1" \
++    "requests" \
++    "httpx==0.24.0" \
++    "uvicorn" \
++    "fastapi" \
++    "einops==0.6.1" \
++    "einops-exts==0.0.4" \
++    "timm==0.6.13" \
++    "ftfy" \
++    "wfdb" \
++    "ninja" \
++    "packaging" \
++    "psutil"
++
++if [[ "$INSTALL_BITSANDBYTES" == "1" ]]; then
++    python -m pip install bitsandbytes
++fi
++
++if [[ "$INSTALL_TRAIN_DEPS" == "1" ]]; then
++    python -m pip install "deepspeed>=0.16,<0.19" wandb
++fi
++
++python -m pip install -e . --no-deps
++
++python - <<'PYTHON_CHECK'
++import torch
++print('torch', torch.__version__)
++print('torch cuda', torch.version.cuda)
++print('cuda available', torch.cuda.is_available())
++if torch.cuda.is_available():
++    print('gpu 0', torch.cuda.get_device_name(0))
++    print('capability', torch.cuda.get_device_capability(0))
++PYTHON_CHECK
++
++printf "\nEnvironment ready. Activate it with: conda activate %s\n" "$ENV_NAME"

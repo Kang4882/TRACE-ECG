@@ -1,0 +1,37 @@
+{
+  "created_at_utc": "2026-06-17T17:55:21.431639+00:00",
+  "source": "/workspace/MJ/GRADU/post_bad_render_unified_results_long.csv",
+  "main_table": "/workspace/MJ/GRADU/by_eval_dataset_presentation/all_main_eval_datasets_presentation.csv",
+  "per_dataset_files": [
+    {
+      "evaluation_dataset": "Official ECG-Bench Broad",
+      "rows": 16,
+      "path": "/workspace/MJ/GRADU/by_eval_dataset_presentation/official_ecg_bench_broad.csv"
+    },
+    {
+      "evaluation_dataset": "GEM-like ECGBench-L3 Choice: CSN+G12EC",
+      "rows": 11,
+      "path": "/workspace/MJ/GRADU/by_eval_dataset_presentation/gem_like_ecgbench_l3_choice_csn_g12ec.csv"
+    },
+    {
+      "evaluation_dataset": "Clean ECGBench-L3 Choice: CSN+G12EC",
+      "rows": 4,
+      "path": "/workspace/MJ/GRADU/by_eval_dataset_presentation/clean_ecgbench_l3_choice_csn_g12ec.csv"
+    },
+    {
+      "evaluation_dataset": "PTB-XL Core7 clean1008",
+      "rows": 5,
+      "path": "/workspace/MJ/GRADU/by_eval_dataset_presentation/ptb_xl_core7_clean1008.csv"
+    },
+    {
+      "evaluation_dataset": "PTB-XL Core4 fold9 clean1008",
+      "rows": 2,
+      "path": "/workspace/MJ/GRADU/by_eval_dataset_presentation/ptb_xl_core4_fold9_clean1008.csv"
+    },
+    {
+      "evaluation_dataset": "PTB-XL Core4 fold10 clean1008",
+      "rows": 2,
+      "path": "/workspace/MJ/GRADU/by_eval_dataset_presentation/ptb_xl_core4_fold10_clean1008.csv"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+component,public_status,current_path,notes
+jsonl_offset_loader,keep,/workspace/MJ/GEM/llava/jsonl_utils.py,Required for large JSONL training without json.load
+trace_ecg_training_args,keep,/workspace/MJ/GEM/llava/train/train.py,Public TRACE-ECG training mode implemented with internal anchor_ecg flags for compatibility
+trace_ecg_dataset_collator,keep,/workspace/MJ/GEM/llava/train/train.py,Builds row-wise candidate instances for bind-eligible rows
+trace_ecg_loss,keep,/workspace/MJ/GEM/llava/train/llava_trainer.py,TargetMargin implementation and memory-safe split backward
+pure_lora_guardrails,keep,/workspace/MJ/GEM/llava/train/train.py,Prevents unintended full projector/tower training
+answer_space_utils,keep,/workspace/MJ/GEM/llava/trace_ecg_utils.py,Public TRACE-ECG re-export for answer-space utilities
+legacy_answer_space_utils,legacy_only,/workspace/MJ/GEM/llava/layoutbind_utils.py,Backward-compatible legacy name used by ablation paths
+lora_sft_public_wrapper,keep,scripts/train_lora_sft_gemlike.sh,Standard public launcher
+trace_ecg_public_wrapper,keep,scripts/train_trace_ecg_gemlike.sh,Standard public launcher
+full_l3_sft_public_wrapper,keep,scripts/train_full_l3_sft_gemlike.sh,Standard public launcher
+ecgbench_l3_choice_scorer,keep,/workspace/MJ/gem-layout-binding/scripts/evaluate_ecgbench_l3_close_ended.py,Uses Consistent-Correct/Inconsistency/Consistent-Error terminology in public reports
+broad_ecgbench_scorer,keep,/workspace/MJ/gem-layout-binding/scripts/evaluate_ecgbench_outputs.py,Aggregates automatic broad ECG-Bench subsets
+gemlike_renderer,keep_with_docs,/workspace/MJ/gem-layout-binding/scripts/render_l3_gemlike_v1.py,Manifest/render preparation
+gemlike_production_renderer,keep_with_docs,/workspace/MJ/gem-layout-binding/scripts/render_l3_gemlike_v1_production.py,Production render entrypoint
+legacy_targetbind,legacy_only,/workspace/MJ/gem-layout-binding/scripts/run_l3_subset_layoutbind_targetbind_margin_full.sh,Do not present as main method
+ptbxl_core_eval_assets,document_external,/workspace/MJ/ecg-reliability/data/calibration_manifests,Move manifest builders or document as external assets
+gradu_results,results_only,/workspace/MJ/GRADU,Do not mix with runnable code
