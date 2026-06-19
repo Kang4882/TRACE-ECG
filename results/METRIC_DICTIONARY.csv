@@ -1,5 +1,5 @@
 metric,full_name,old_name,definition
-ADI,Always-wrong Display Inconsistency,Unstable-Wrong,Predictions differ across layouts and none of the layouts is correct.
+ADI,Always-wrong Inconsistency,Unstable-Wrong,Predictions differ across layouts and none of the layouts is correct.
 Acc,Accuracy,,"Overall row-level or grouped-layout average accuracy, depending on evaluator."
 Acc_12R1C,12R1C Layout Accuracy,,Accuracy on the 12R1C ECG display layout.
 Acc_3R4C,3R4C Layout Accuracy,,Accuracy on the 3R4C ECG display layout.
@@ -10,11 +10,11 @@ Accuracy_6R2C,6R2C Layout Accuracy,,Accuracy on the 6R2C ECG display layout.
 BalAcc_12R1C,12R1C Layout Balanced Accuracy,,Balanced accuracy on the 12R1C ECG display layout.
 BalAcc_3R4C,3R4C Layout Balanced Accuracy,,Balanced accuracy on the 3R4C ECG display layout.
 BalAcc_6R2C,6R2C Layout Balanced Accuracy,,Balanced accuracy on the 6R2C ECG display layout.
-CDI,Correctable Display Inconsistency,Recoverable Flip,Predictions differ across layouts and at least one layout is correct.
-DCC,Display-Consistent Correct,Stable-Correct,All layouts give the same prediction and that prediction is correct.
-DCE,Display-Consistent Error,Stable-Wrong,All layouts give the same prediction but that prediction is wrong.
-DI,Display Inconsistency,Flip Rate,Fraction of valid grouped samples where predictions are not identical across layouts.
-Layout Agreement,Layout Agreement,,Fraction of valid groups where all layout predictions are identical; DCC + DCE.
+CDI,Correctable Inconsistency,Recoverable Flip,Predictions differ across layouts and at least one layout is correct.
+DCC,Consistent-Correct,Stable-Correct,All layouts give the same prediction and that prediction is correct.
+DCE,Consistent-Error,Stable-Wrong,All layouts give the same prediction but that prediction is wrong.
+DI,Inconsistency,Flip Rate,Fraction of valid grouped samples where predictions are not identical across layouts.
+Consistency,Consistency,,Fraction of valid groups where all layout predictions are identical; DCC + DCE.
 MacroF1_12R1C,12R1C Layout Macro F1,,Macro-F1 on the 12R1C ECG display layout.
 MacroF1_3R4C,3R4C Layout Macro F1,,Macro-F1 on the 3R4C ECG display layout.
 MacroF1_6R2C,6R2C Layout Macro F1,,Macro-F1 on the 6R2C ECG display layout.

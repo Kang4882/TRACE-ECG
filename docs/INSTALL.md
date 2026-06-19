@@ -10,7 +10,7 @@ bash scripts/apply_gem_patch.sh /path/to/GEM
 
 The patch step:
 
-1. applies tracked GEM source changes from `patches/gem_anchor_ecg_tracked_changes.patch`;
+1. applies tracked GEM source changes from `patches/gem_trace_ecg_tracked_changes.patch`;
 2. copies new files from `patches/new_files/` into the GEM checkout.
 
 ## Environment
@@ -28,4 +28,3 @@ For machine-specific paths, copy the example first:
 cp configs/paths.example.env paths.env
 source paths.env
 ```
-

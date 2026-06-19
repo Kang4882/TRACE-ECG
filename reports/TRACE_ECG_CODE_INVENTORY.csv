@@ -1,18 +1,19 @@
 component,public_status,current_path,notes
-jsonl_offset_loader,keep,/workspace/MJ/GEM/llava/jsonl_utils.py,Required for large JSONL training without json.load
-trace_ecg_training_args,keep,/workspace/MJ/GEM/llava/train/train.py,Public TRACE-ECG training mode implemented with internal anchor_ecg flags for compatibility
-trace_ecg_dataset_collator,keep,/workspace/MJ/GEM/llava/train/train.py,Builds row-wise candidate instances for bind-eligible rows
-trace_ecg_loss,keep,/workspace/MJ/GEM/llava/train/llava_trainer.py,TargetMargin implementation and memory-safe split backward
-pure_lora_guardrails,keep,/workspace/MJ/GEM/llava/train/train.py,Prevents unintended full projector/tower training
-answer_space_utils,keep,/workspace/MJ/GEM/llava/trace_ecg_utils.py,Public TRACE-ECG re-export for answer-space utilities
-legacy_answer_space_utils,legacy_only,/workspace/MJ/GEM/llava/layoutbind_utils.py,Backward-compatible legacy name used by ablation paths
-lora_sft_public_wrapper,keep,scripts/train_lora_sft_gemlike.sh,Standard public launcher
-trace_ecg_public_wrapper,keep,scripts/train_trace_ecg_gemlike.sh,Standard public launcher
-full_l3_sft_public_wrapper,keep,scripts/train_full_l3_sft_gemlike.sh,Standard public launcher
-ecgbench_l3_choice_scorer,keep,/workspace/MJ/gem-layout-binding/scripts/evaluate_ecgbench_l3_close_ended.py,Uses Consistent-Correct/Inconsistency/Consistent-Error terminology in public reports
-broad_ecgbench_scorer,keep,/workspace/MJ/gem-layout-binding/scripts/evaluate_ecgbench_outputs.py,Aggregates automatic broad ECG-Bench subsets
-gemlike_renderer,keep_with_docs,/workspace/MJ/gem-layout-binding/scripts/render_l3_gemlike_v1.py,Manifest/render preparation
-gemlike_production_renderer,keep_with_docs,/workspace/MJ/gem-layout-binding/scripts/render_l3_gemlike_v1_production.py,Production render entrypoint
-legacy_targetbind,legacy_only,/workspace/MJ/gem-layout-binding/scripts/run_l3_subset_layoutbind_targetbind_margin_full.sh,Do not present as main method
-ptbxl_core_eval_assets,document_external,/workspace/MJ/ecg-reliability/data/calibration_manifests,Move manifest builders or document as external assets
-gradu_results,results_only,/workspace/MJ/GRADU,Do not mix with runnable code
+jsonl_offset_loader,keep,/workspace/MJ/GEM/llava/jsonl_utils.py,Required for large JSONL training without full json.load materialization.
+gem_train_args,keep,/workspace/MJ/GEM/llava/train/train.py,Contains grouped triplet flags pure LoRA guardrails and appendix TargetMargin flags.
+gem_dataset_collator,keep,/workspace/MJ/GEM/llava/train/train.py,Builds normal SFT batches grouped triplet batches and appendix TargetMargin candidate batches.
+appendix_targetmargin_loss,appendix_only,/workspace/MJ/GEM/llava/train/llava_trainer.py,Row-wise target-vs-best-wrong margin diagnostic; not the TRACE-ECG framework.
+pure_lora_guardrails,keep,/workspace/MJ/GEM/llava/train/train.py,Prevents unintended full projector or tower training in pure LoRA runs.
+answer_space_utils,keep,/workspace/MJ/GEM/llava/trace_ecg_utils.py,Shared finite-answer utilities used by TRACE-ECG experiments and appendix diagnostics.
+legacy_answer_space_utils,legacy_only,/workspace/MJ/GEM/llava/layoutbind_utils.py,Backward-compatible legacy name used by ablation paths.
+lora_sft_public_wrapper,keep,scripts/train_lora_sft_gemlike.sh,Main GL-SL-LoRA and GL-TL-LoRA launcher.
+full_l3_sft_public_wrapper,keep,scripts/train_full_l3_sft_gemlike.sh,Main GL-TL-Full launcher.
+target_margin_public_wrapper,appendix_only,scripts/train_target_margin_triplet_lora.sh,TM-TL-LoRA diagnostic launcher.
+deprecated_trace_training_wrapper,deprecated,scripts/train_trace_ecg_gemlike.sh,Compatibility wrapper that forwards to target_margin_triplet_lora.
+ecgbench_l3_choice_scorer,keep,tools/evaluate_ecgbench_l3_close_ended.py,Computes Consistent-Correct Inconsistency and Consistent-Error for closed-ended triplets.
+broad_ecgbench_scorer,keep_with_caveat,tools/evaluate_ecgbench_outputs.py,Broad automatic scorer; parse-failure fallback must be documented if used.
+gemlike_renderer,document_external,/workspace/MJ/gem-layout-binding/scripts/render_l3_gemlike_v1.py,Internal renderer for source-matched GEM-like triplets.
+gemlike_production_renderer,document_external,/workspace/MJ/gem-layout-binding/scripts/render_l3_gemlike_v1_production.py,Internal production render entrypoint.
+clean1008_renderer,document_external,/workspace/MJ/gem-layout-binding/scripts/optimize_l3_render_pipeline.py,Internal clean triplet renderer and corrected lead-order source.
+legacy_targetbind,legacy_only,/workspace/MJ/gem-layout-binding/scripts/run_l3_subset_layoutbind_targetbind_margin_full.sh,Do not present as a main method.
+ptbxl_core_eval_assets,document_external,/workspace/MJ/ecg-reliability/data/calibration_manifests,External/internal manifests for PTB-XL core pilot audits.

@@ -1,55 +1,68 @@
 # TRACE-ECG
 
-Target-Anchored Counterfactual Display Calibration for ECG MLLMs.
+Triplet-based Reliability and Artifact-Controlled Evaluation for ECG MLLMs.
 
-TRACE-ECG calibrates each counterfactual ECG display view toward the correct
-clinical target, rather than forcing layout predictions to agree with each
-other. This matters because display consistency can be false: a model can be
-consistent across ECG layouts while consistently wrong.
+TRACE-ECG is an audit framework, not a training method. It asks whether an ECG
+multimodal large language model gives stable and correct clinical answers when
+the same raw ECG signal is rendered under controlled display changes.
 
-This repository contains the public project layer for TRACE-ECG:
+The central principle is:
 
-- training launchers
-- evaluation/scoring tools
+```text
+Consistency is not reliability.
+A model can become more consistent by becoming consistently wrong.
+```
+
+## What TRACE-ECG Evaluates
+
+TRACE-ECG separates three sources of behavior that are often conflated:
+
+1. Same-signal layout variation.
+2. Rendering artifact policy.
+3. Correctness-aware reliability status.
+
+For each eligible ECG sample, the same raw waveform is paired with ECG images
+rendered as:
+
+- `3R4C`: 3 rows x 4 columns
+- `6R2C`: 6 rows x 2 columns
+- `12R1C`: 12 rows x 1 column
+
+The model is then evaluated with a reliability taxonomy:
+
+- `Consistent-Correct`: all displays are correct.
+- `Inconsistency`: display answers differ, or correctness is mixed.
+- `Consistent-Error`: all displays agree on the same wrong answer.
+
+This repository contains the public project layer for the TRACE-ECG audit:
+
+- evaluation and scoring tools
+- training launchers for experimental conditions evaluated by the audit
 - result tables
 - dataset preparation notes
-- GEM patch files needed to reproduce the method
+- GEM patch files used by the experiments
 
-The method is implemented on top of GEM. We do not vendor the full GEM source as
-the top-level project because this repository is intended to present TRACE-ECG
-as the primary contribution. Use the patch files in `patches/` to apply the
-method to a GEM checkout.
+Large ECG datasets, rendered PNGs, and model checkpoints are not included.
 
-Implementation note: the public method name is TRACE-ECG. The GEM patch still
-uses internal `anchor_ecg_*` flag names for backward compatibility with the
-earlier development branch; the public launchers expose TRACE-ECG names and map
-them to those internal flags.
+## Experimental Conditions
 
-## Method
+TRACE-ECG is the framework name. The rows below are model conditions evaluated
+by the framework:
 
-Main objective:
+| Paper name | Short name | Role |
+| --- | --- | --- |
+| PULSE (Image-only ECG MLLM) | PULSE | Image-only baseline |
+| GEM (Signal+Image ECG MLLM) | GEM | Signal+image baseline |
+| GEM-like Single-Layout LoRA | GL-SL-LoRA | View-matched single-layout control |
+| GEM-like Triplet-Layout LoRA | GL-TL-LoRA | Triplet-layout LoRA SFT |
+| GEM-like Triplet-Layout Full SFT | GL-TL-Full | Full-parameter triplet-layout SFT |
+| Clean1008 Single-Layout SFT | CL-SL-SFT | Controlled clean single-layout SFT |
+| Clean1008 Triplet-Layout Subset SFT | CL-TL-Subset-SFT | Controlled clean triplet-layout SFT |
+| Target-Margin Triplet LoRA | TM-TL-LoRA | Appendix-only diagnostic |
 
-```text
-L_total = L_CE_all + lambda_margin * L_TargetMargin_bind
-```
-
-Where:
-
-- `L_CE_all` is ordinary supervised fine-tuning cross entropy on every row.
-- `TargetMargin` is applied only to bind-eligible close-ended rows.
-- Candidate answers are scored by teacher-forced likelihood under the current
-  model.
-- No teacher model is used.
-- No layout-to-layout KL or consistency loss is used by the main method.
-
-Default TRACE-ECG hyperparameters:
-
-```text
-lambda_margin = 0.05
-margin_delta = 0.5
-length_normalize = True
-strict_eligibility = True
-```
+`TM-TL-LoRA` is not the TRACE-ECG framework. It is a diagnostic training
+variant that adds a row-wise target-margin loss on bind-eligible closed-ended
+rows.
 
 ## Repository Layout
 
@@ -58,7 +71,7 @@ configs/      Example path configuration
 docs/         Method, data, experiment, and metric documentation
 scripts/      Public training and scoring entrypoints
 tools/        Standalone scoring utilities
-patches/      GEM patch and new files required by TRACE-ECG
+patches/      GEM patch and new files used by the experiments
 results/      Curated result tables
 reports/      Code inventory and release reports
 ```
@@ -66,7 +79,7 @@ reports/      Code inventory and release reports
 ## Quick Start
 
 1. Clone or prepare a compatible GEM checkout.
-2. Apply the TRACE-ECG GEM patch:
+2. Apply the GEM patch used by these experiments:
 
 ```bash
 bash scripts/apply_gem_patch.sh /path/to/GEM
@@ -80,36 +93,34 @@ vim paths.env
 source paths.env
 ```
 
-4. Run a LoRA-SFT control:
+4. Score a close-ended ECGBench-L3 triplet prediction file:
+
+```bash
+bash scripts/score_ecgbench_l3_choice.sh \
+  --predictions /path/to/predictions.jsonl \
+  --out_dir /path/to/output_dir
+```
+
+5. Run a LoRA-SFT experimental condition:
 
 ```bash
 USER_APPROVED_FULL_TRAIN=1 bash scripts/train_lora_sft_gemlike.sh \
   --full_train --setting l3 --frac 005
 ```
 
-5. Run TRACE-ECG:
+6. Run the appendix-only Target-Margin diagnostic:
 
 ```bash
-USER_APPROVED_FULL_TRAIN=1 bash scripts/train_trace_ecg_gemlike.sh \
+USER_APPROVED_FULL_TRAIN=1 bash scripts/train_target_margin_triplet_lora.sh \
   --full_train --frac 005
 ```
 
-## Display Robustness Metrics
-
-Public tables use:
-
-- `Consistent-Correct`: all layouts predict the correct target.
-- `Inconsistency`: layout predictions are not all identical.
-- `Consistent-Error`: all layouts agree on the same wrong answer.
-- `Correctable Inconsistency`: inconsistent and at least one layout is correct.
-- `Always-wrong Inconsistency`: inconsistent and no layout is correct.
-- `Worst Acc`: minimum per-layout accuracy.
-- `Oracle Acc`: correctness if any layout is correct.
-
 ## Data
 
-Large ECG data and rendered images are not included in this repository. See
-`docs/DATA.md`.
+The public repository does not include raw ECG data, rendered images, model
+weights, or full JSONL manifests. See `docs/DATA.md` and
+`docs/DATA_GENERATION.md` for the controlled dataset definitions and validation
+reports.
 
 ## License and Upstream
 

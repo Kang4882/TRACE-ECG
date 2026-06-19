@@ -1,46 +1,82 @@
 # Method
 
-TRACE-ECG stands for Target-Anchored Counterfactual Display Calibration for ECG
-MLLMs.
+TRACE-ECG stands for Triplet-based Reliability and Artifact-Controlled
+Evaluation for ECG MLLMs.
 
-The main method uses same-signal multi-layout ECG displays but does not optimize
-layout-to-layout agreement directly. Instead, each displayed view is anchored to
-the same clinical target.
+TRACE-ECG is an audit protocol. It is not a new training objective.
 
-## Objective
+## Audit Question
 
-```text
-L_total = L_CE_all + lambda_margin * L_TargetMargin_bind
-```
+Given the same raw ECG waveform, should an ECG multimodal LLM preserve the same
+clinical answer when the accompanying ECG display changes?
 
-For each bind-eligible row with candidate answer set `C` and target `y`:
+TRACE-ECG evaluates this by holding the signal, instruction, and target fixed
+while changing the rendered display according to controlled policies.
 
-```text
-score(c) = - normalized_NLL(c | prompt, ECG image, ECG time series)
-margin = score(y) - max_{c != y} score(c)
-L_TargetMargin = ReLU(margin_delta - margin)
-```
+## Same-Signal Triplet Rendering
 
-`TargetMargin` backpropagates through the current LoRA model. There is no frozen
-teacher and no detached candidate score.
+Each eligible sample is rendered into three standard ECG display geometries:
 
-## Main Mode
+- `3R4C`: 3 rows x 4 columns
+- `6R2C`: 6 rows x 2 columns
+- `12R1C`: 12 rows x 1 column
 
-Main TRACE-ECG runs use:
+The triplet shares:
 
-```text
-grouped_triplet_training = False
-layoutbind_enable = False
-anchor_ecg_enable = True
-anchor_ecg_rowwise = True
-targetmargin_enable = True
-```
+- raw ECG waveform reference
+- signal segment
+- instruction
+- target
+- source metadata
 
-The main method does not use:
+Only the display condition changes.
 
-- legacy TargetBind
-- pbar/q consensus distributions
-- layout-to-layout KL
-- grouped triplet consistency
-- worst-layout max aggregation
+## Artifact-Control Protocol
 
+The framework separates display effects into explicit audit settings:
+
+| Setting | Purpose |
+| --- | --- |
+| `clean` | Isolate layout variation without stochastic visual artifacts. |
+| `same-artifact seed` | Change layout while holding the artifact bundle fixed. |
+| `independent-artifact seed` | Measure combined layout and artifact instability. |
+| `same-layout multi-artifact` | Isolate artifact sensitivity without layout change. |
+
+The current public result tables include clean and GEM-like source-matched
+triplet evaluations. Additional artifact-control modes should be reported
+separately when generated.
+
+## Reliability Taxonomy
+
+For closed-ended tasks with one parsed answer per display, TRACE-ECG reports
+group status over the three displays:
+
+- `Consistent-Correct`: all three displays predict the correct answer.
+- `Inconsistency`: predictions differ across displays, or correctness is mixed.
+- `Consistent-Error`: all three displays produce the same wrong answer.
+
+This distinction matters because lower inconsistency is not automatically better
+if errors become stable.
+
+## Experimental Conditions
+
+The framework evaluates baselines and calibration conditions such as:
+
+- PULSE
+- GEM
+- GL-SL-LoRA
+- GL-TL-LoRA
+- GL-TL-Full
+- CL-SL-SFT
+- CL-TL-Subset-SFT
+
+Target-Margin Triplet LoRA (`TM-TL-LoRA`) is appendix-only under the current
+paper story. It is useful as a diagnostic but should not be described as the
+TRACE-ECG method.
+
+## Scope Limitation
+
+The main triplet reliability taxonomy is intended for closed-ended tasks with a
+well-defined answer space. Report generation and multi-label outputs require
+separate semantic or contradiction metrics and are not treated as main flip-rate
+tasks.

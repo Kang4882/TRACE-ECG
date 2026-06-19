@@ -3,7 +3,7 @@
   "metrics": [
     {
       "metric": "ADI",
-      "full_name": "Always-wrong Display Inconsistency",
+      "full_name": "Always-wrong Inconsistency",
       "old_name": "Unstable-Wrong",
       "definition": "Predictions differ across layouts and none of the layouts is correct."
     },
@@ -69,31 +69,31 @@
     },
     {
       "metric": "CDI",
-      "full_name": "Correctable Display Inconsistency",
+      "full_name": "Correctable Inconsistency",
       "old_name": "Recoverable Flip",
       "definition": "Predictions differ across layouts and at least one layout is correct."
     },
     {
       "metric": "DCC",
-      "full_name": "Display-Consistent Correct",
+      "full_name": "Consistent-Correct",
       "old_name": "Stable-Correct",
       "definition": "All layouts give the same prediction and that prediction is correct."
     },
     {
       "metric": "DCE",
-      "full_name": "Display-Consistent Error",
+      "full_name": "Consistent-Error",
       "old_name": "Stable-Wrong",
       "definition": "All layouts give the same prediction but that prediction is wrong."
     },
     {
       "metric": "DI",
-      "full_name": "Display Inconsistency",
+      "full_name": "Inconsistency",
       "old_name": "Flip Rate",
       "definition": "Fraction of valid grouped samples where predictions are not identical across layouts."
     },
     {
-      "metric": "Layout Agreement",
-      "full_name": "Layout Agreement",
+      "metric": "Consistency",
+      "full_name": "Consistency",
       "old_name": null,
       "definition": "Fraction of valid groups where all layout predictions are identical; DCC + DCE."
     },

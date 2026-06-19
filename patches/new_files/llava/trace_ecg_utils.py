@@ -1,8 +1,9 @@
-"""TRACE-ECG answer-space utilities.
+"""Shared answer-space utilities for TRACE-ECG experiments.
 
-This module provides the public TRACE-ECG name for answer-space and
-TargetMargin helpers. The implementation is kept in ``layoutbind_utils`` for
-backward compatibility with legacy ablation code paths.
+TRACE-ECG is the audit framework. These helpers support finite-answer parsing
+and appendix TargetMargin diagnostics used by some experimental conditions.
+The implementation is kept in ``layoutbind_utils`` for backward compatibility
+with legacy ablation code paths.
 """
 
 from llava.layoutbind_utils import *  # noqa: F401,F403

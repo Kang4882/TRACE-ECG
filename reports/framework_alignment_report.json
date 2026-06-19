@@ -1,0 +1,18 @@
+{
+  "status": "TRACE_ECG_FRAMEWORK_ALIGNMENT_COMPLETE",
+  "framework_name": "TRACE-ECG",
+  "framework_expansion": "Triplet-based Reliability and Artifact-Controlled Evaluation for ECG MLLMs",
+  "framework_role": "audit protocol",
+  "not_a_training_method": true,
+  "main_public_docs_updated": [
+    "README.md",
+    "docs/METHOD.md",
+    "docs/EXPERIMENTS.md",
+    "docs/DATA.md",
+    "docs/DATA_GENERATION.md",
+    "results/README.md"
+  ],
+  "target_margin_role": "appendix diagnostic only",
+  "target_margin_launcher": "scripts/train_target_margin_triplet_lora.sh",
+  "deprecated_compatibility_launcher": "scripts/train_trace_ecg_gemlike.sh"
+}

@@ -1251,7 +1251,7 @@ index ce2853a..d75d7a5 100644
 +        if candidate_count <= 0:
 +            return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
 +        if base_count_tensor is None:
-+            raise ValueError("TRACE-ECG row-wise loss requires anchor_ecg_base_count.")
++            raise ValueError("TargetMargin row-wise loss requires anchor_ecg_base_count.")
 +        base_count = int(base_count_tensor.detach().cpu().item()) if torch.is_tensor(base_count_tensor) else int(base_count_tensor)
 +        skipped_count = int(skipped_tensor.detach().cpu().item()) if torch.is_tensor(skipped_tensor) else int(skipped_tensor or 0)
 +        data_args = self._triplet_data_args()
@@ -1261,7 +1261,7 @@ index ce2853a..d75d7a5 100644
 +        sequence_count = int(expanded_labels.shape[0])
 +        if sequence_count != base_count + candidate_count:
 +            raise ValueError(
-+                f"TRACE-ECG expected {base_count + candidate_count} flattened examples "
++                f"TargetMargin expected {base_count + candidate_count} flattened examples "
 +                f"({base_count} base + {candidate_count} candidates), got {sequence_count}."
 +            )
 +        ce_loss = self._token_ce_loss_from_logits(logits[:base_count], expanded_labels[:base_count])
@@ -1303,7 +1303,7 @@ index ce2853a..d75d7a5 100644
 +        if self.args.n_gpu > 1:
 +            loss = loss.mean()
 +        if self.use_apex:
-+            raise RuntimeError("TRACE-ECG memory-safe backward does not support Apex AMP.")
++            raise RuntimeError("TargetMargin memory-safe backward does not support Apex AMP.")
 +        self.accelerator.backward(loss)
 +
 +    def _anchor_ecg_zero_trainable_loss(self, model) -> torch.Tensor:
@@ -1314,14 +1314,14 @@ index ce2853a..d75d7a5 100644
 +            term = param.reshape(-1)[0] * 0.0
 +            zero = term if zero is None else zero + term
 +        if zero is None:
-+            raise RuntimeError("TRACE-ECG memory-safe backward found no trainable parameters.")
++            raise RuntimeError("TargetMargin memory-safe backward found no trainable parameters.")
 +        return zero
 +
 +    def _anchor_ecg_memory_safe_training_step(self, model, inputs) -> torch.Tensor:
 +        model.train()
 +        inputs = self._prepare_inputs(inputs)
 +        if is_sagemaker_mp_enabled():
-+            raise RuntimeError("TRACE-ECG memory-safe backward does not support SageMaker model parallel.")
++            raise RuntimeError("TargetMargin memory-safe backward does not support SageMaker model parallel.")
 +
 +        with self.compute_loss_context_manager():
 +            base_count_tensor = inputs.pop("anchor_ecg_base_count", None)
@@ -1818,7 +1818,7 @@ index 97d3876..4c0a012 100644
 +    )
 +    anchor_ecg_enable: bool = field(
 +        default=False,
-+        metadata={"help": "Enable TRACE-ECG row-wise TargetMargin loss. This is the main method; it does not enable TargetBind."},
++        metadata={"help": "Enable appendix row-wise TargetMargin diagnostic loss. This does not define the TRACE-ECG audit framework."},
 +    )
 +    anchor_ecg_rowwise: bool = field(
 +        default=True,
@@ -1834,7 +1834,7 @@ index 97d3876..4c0a012 100644
 +    )
 +    anchor_ecg_memory_safe_backward: bool = field(
 +        default=False,
-+        metadata={"help": "Split TRACE-ECG CE and TargetMargin backward passes to reduce peak memory without changing the objective."},
++        metadata={"help": "Split TargetMargin diagnostic CE and TargetMargin backward passes to reduce peak memory without changing the objective."},
 +    )
 +    anchor_ecg_margin_chunk_bind_rows: int = field(
 +        default=2,
@@ -2831,11 +2831,11 @@ index 97d3876..4c0a012 100644
 +        data_args.targetmargin_strict_eligibility = data_args.anchor_ecg_strict_eligibility
 +
 +    if data_args.anchor_ecg_enable and data_args.layoutbind_enable:
-+        raise RuntimeError("TRACE-ECG and legacy LayoutBind/TargetBind cannot be enabled together.")
++        raise RuntimeError("TargetMargin diagnostic and legacy LayoutBind/TargetBind cannot be enabled together.")
 +    if data_args.layoutbind_enable and not data_args.grouped_triplet_training:
 +        raise RuntimeError("legacy LayoutBind requires --grouped_triplet_training True.")
 +    if data_args.anchor_ecg_enable and not data_args.anchor_ecg_rowwise:
-+        raise RuntimeError("The main TRACE-ECG implementation currently supports row-wise TargetMargin only.")
++        raise RuntimeError("The TargetMargin diagnostic currently supports row-wise TargetMargin only.")
      local_rank = training_args.local_rank
      compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
 +    resolved_attn_implementation = attn_implementation or training_args.attn_implementation

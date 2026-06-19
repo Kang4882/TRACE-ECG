@@ -8,8 +8,7 @@ Usage:
   MAX_STEPS=100 bash train_full_l3_sft_gemlike.sh --preflight
 
 Runs full-parameter row-level L3 SFT on GEM-like expanded L3 JSONL.
-TRACE-ECG, TargetMargin, legacy LayoutBind, and grouped triplet training are
-disabled.
+TargetMargin, legacy LayoutBind, and grouped triplet training are disabled.
 EOF
 }
 
@@ -69,7 +68,7 @@ echo "RUN_NAME=${RUN_NAME}"
 echo "DATA_PATH=${DATA_PATH}"
 echo "OUTPUT_DIR=${OUTPUT_DIR}"
 echo "INIT_CHECKPOINT=${INIT_CHECKPOINT}"
-echo "TRACE_ECG=False"
+echo "TRACE_ECG_FRAMEWORK_NOTE=audit_protocol_not_training_objective"
 echo "INTERNAL_GEM_FLAG_PREFIX=anchor_ecg"
 echo "TARGETMARGIN=False"
 echo "LAYOUTBIND=False"

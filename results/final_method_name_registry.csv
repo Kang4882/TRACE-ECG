@@ -1,0 +1,16 @@
+paper_name,short_name,internal_names,role,section
+PULSE (Image-only ECG MLLM),PULSE,Official PULSE; PULSE image-only,Image-only ECG MLLM baseline,Main
+GEM (Signal+Image ECG MLLM),GEM,Official GEM,Signal+image ECG MLLM baseline,Main
+GEM-like Single-Layout LoRA 1%,GL-SL-LoRA-1%,L1_LoRA_SFT_frac001; L1_SameGroup_LoRA_SFT_frac001,View-matched single-layout LoRA control,Main
+GEM-like Triplet-Layout LoRA 1%,GL-TL-LoRA-1%,L3_LoRA_SFT_frac001,Triplet-layout LoRA SFT,Main
+GEM-like Single-Layout LoRA 3%,GL-SL-LoRA-3%,L1_LoRA_SFT_frac003; L1_SameGroup_LoRA_SFT_frac003,View-matched single-layout LoRA control,Main
+GEM-like Triplet-Layout LoRA 3%,GL-TL-LoRA-3%,L3_LoRA_SFT_frac003,Triplet-layout LoRA SFT,Main
+GEM-like Single-Layout LoRA 5%,GL-SL-LoRA-5%,L1_LoRA_SFT_frac005; L1_SameGroup_LoRA_SFT_frac005,View-matched single-layout LoRA control,Main
+GEM-like Triplet-Layout LoRA 5%,GL-TL-LoRA-5%,L3_LoRA_SFT_frac005,Triplet-layout LoRA SFT,Main
+GEM-like Triplet-Layout Full SFT,GL-TL-Full,L3_FULL_SFT; full_l3_sft_gemlike,Full-parameter triplet-layout SFT,Main
+Clean1008 Single-Layout SFT,CL-SL-SFT,L1_SingleLayout; L1_SingleLayout_clean1008,Clean controlled single-layout SFT,Main
+Clean1008 Triplet-Layout Subset SFT,CL-TL-Subset-SFT,L3Subset_TripletLayout; L3Subset_TripletLayoutTraining_clean1008,Clean controlled triplet-layout subset SFT,Main
+Target-Margin Triplet LoRA 1%,TM-TL-LoRA-1%,legacy_target_margin_frac001; TM_TL_LoRA_frac001,Target-margin diagnostic,Appendix
+Target-Margin Triplet LoRA 5%,TM-TL-LoRA-5%,legacy_target_margin_frac005; TM_TL_LoRA_frac005,Target-margin diagnostic,Appendix
+PTB-XL Core4 LoRA Pilot,P4-LoRA,PTBXLCore4_LoRA_SFT_replay20,PTB-XL Core4 pilot,Appendix
+PTB-XL Core4 LayoutBind Pilot,P4-LayoutBind,PTBXLCore4_LoRA_LegacyLayoutBind_replay20,Legacy PTB-XL Core4 LayoutBind pilot,Appendix

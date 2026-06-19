@@ -4,21 +4,21 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  USER_APPROVED_FULL_TRAIN=1 bash train_lora_sft_gemlike.sh --full_train --setting l1|l3 --frac 001|003|005|010
-  USER_APPROVED_FULL_TRAIN=1 MAX_STEPS=20 bash train_lora_sft_gemlike.sh --full_train --setting l3 --frac 005
+  USER_APPROVED_FULL_TRAIN=1 bash train_target_margin_triplet_lora.sh --full_train --frac 001|003|005|010
+  USER_APPROVED_FULL_TRAIN=1 MAX_STEPS=20 bash train_target_margin_triplet_lora.sh --full_train --frac 005
 
-Runs row-level LoRA SFT only. TargetMargin, legacy LayoutBind, and grouped
-triplet training are disabled.
+Runs appendix-only Target-Margin Triplet LoRA:
+  CE on all rows + lambda_margin * row-wise TargetMargin on bind-eligible rows.
+
+Legacy TargetBind/LayoutBind and grouped triplet training are disabled.
 EOF
 }
 
 MODE=""
-SETTING=""
 FRAC=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --full_train) MODE="full_train"; shift ;;
-    --setting) SETTING="${2:-}"; shift 2 ;;
     --frac) FRAC="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1"; usage; exit 1 ;;
@@ -27,10 +27,6 @@ done
 
 if [[ "${MODE}" != "full_train" || "${USER_APPROVED_FULL_TRAIN:-0}" != "1" ]]; then
   echo "Training is gated. Set USER_APPROVED_FULL_TRAIN=1 and pass --full_train."
-  exit 1
-fi
-if [[ "${SETTING}" != "l1" && "${SETTING}" != "l3" ]]; then
-  echo "--setting must be l1 or l3"
   exit 1
 fi
 if [[ ! "${FRAC}" =~ ^(001|003|005|010)$ ]]; then
@@ -53,13 +49,12 @@ ECG_TOWER="${ECG_TOWER:-${GEM_ROOT}/ecg_coca/open_clip/checkpoint/cpt_wfep_epoch
 OUTPUT_ROOT="${OUTPUT_ROOT:-/data/model_checkpoints/trace_ecg_experiments}"
 CONDA_ENV="${CONDA_ENV:-gem}"
 
-if [[ "${SETTING}" == "l1" ]]; then
-  DATA_PATH="${DATA_PATH:-${GEMLIKE_DATA_ROOT}/gem_jsons/ablations/gem_train_l1_gemlike_samegroups_frac${FRAC}.jsonl}"
-  RUN_NAME="${RUN_NAME:-L1_LoRA_SFT_frac${FRAC}}"
-else
-  DATA_PATH="${DATA_PATH:-${GEMLIKE_DATA_ROOT}/gem_jsons/fractions/gem_train_l3_gemlike_frac${FRAC}.jsonl}"
-  RUN_NAME="${RUN_NAME:-L3_LoRA_SFT_frac${FRAC}}"
-fi
+DATA_PATH="${DATA_PATH:-${GEMLIKE_DATA_ROOT}/gem_jsons/fractions/gem_train_l3_gemlike_frac${FRAC}.jsonl}"
+RUN_NAME="${RUN_NAME:-TM_TL_LoRA_frac${FRAC}}"
+OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_ROOT}/${RUN_NAME}}"
+LOG_DIR="${OUTPUT_DIR}/logs"
+LOG_FILE="${LOG_DIR}/train_$(date +%Y%m%d_%H%M%S).log"
+TRAIN_LOG_CSV="${LOG_DIR}/target_margin_triplet_lora_train_log.csv"
 
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 PER_DEVICE_TRAIN_BATCH_SIZE="${PER_DEVICE_TRAIN_BATCH_SIZE:-8}"
@@ -70,9 +65,6 @@ if (( EFFECTIVE_GLOBAL_BATCH % (NPROC_PER_NODE * PER_DEVICE_TRAIN_BATCH_SIZE) !=
 fi
 GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-$((EFFECTIVE_GLOBAL_BATCH / (NPROC_PER_NODE * PER_DEVICE_TRAIN_BATCH_SIZE)))}"
 
-OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_ROOT}/${RUN_NAME}}"
-LOG_DIR="${OUTPUT_DIR}/logs"
-LOG_FILE="${LOG_DIR}/train_$(date +%Y%m%d_%H%M%S).log"
 mkdir -p "${LOG_DIR}" "${OUTPUT_DIR}"
 exec > >(tee -a "${LOG_FILE}") 2>&1
 
@@ -86,27 +78,37 @@ export WANDB_MODE="${WANDB_MODE:-offline}"
 export TOKENIZERS_PARALLELISM="false"
 export PYTHONUNBUFFERED="1"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+# Internal compatibility: the GEM trainer currently uses anchor_ecg_* flag names.
+export TARGET_MARGIN_TRAIN_LOG_CSV="${TRAIN_LOG_CSV}"
+export ANCHOR_ECG_TRAIN_LOG_CSV="${TRAIN_LOG_CSV}"
 
 echo "RUN_NAME=${RUN_NAME}"
-echo "SETTING=${SETTING}"
 echo "DATA_PATH=${DATA_PATH}"
 echo "OUTPUT_DIR=${OUTPUT_DIR}"
 echo "NPROC_PER_NODE=${NPROC_PER_NODE}"
 echo "PER_DEVICE_TRAIN_BATCH_SIZE=${PER_DEVICE_TRAIN_BATCH_SIZE}"
 echo "GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS}"
 echo "EFFECTIVE_GLOBAL_BATCH=${EFFECTIVE_GLOBAL_BATCH}"
+echo "TARGET_MARGIN_TRIPLET_LORA=True"
 echo "TRACE_ECG_FRAMEWORK_NOTE=audit_protocol_not_training_objective"
+echo "TARGET_MARGIN_MEMORY_SAFE_BACKWARD=${TARGET_MARGIN_MEMORY_SAFE_BACKWARD:-${TRACE_ECG_MEMORY_SAFE_BACKWARD:-True}}"
+echo "TARGET_MARGIN_CHUNK_BIND_ROWS=${TARGET_MARGIN_CHUNK_BIND_ROWS:-${TRACE_ECG_MARGIN_CHUNK_BIND_ROWS:-2}}"
 echo "INTERNAL_GEM_FLAG_PREFIX=anchor_ecg"
-echo "TARGETMARGIN=False"
+echo "TARGETMARGIN=True"
 echo "LAYOUTBIND=False"
 echo "GROUPED_TRIPLET_TRAINING=False"
+
+TARGET_MARGIN_LAMBDA_VALUE="${TARGET_MARGIN_LAMBDA:-${TRACE_ECG_LAMBDA_MARGIN:-0.05}}"
+TARGET_MARGIN_DELTA_VALUE="${TARGET_MARGIN_DELTA:-${TRACE_ECG_MARGIN_DELTA:-0.5}}"
+TARGET_MARGIN_MEMORY_SAFE_VALUE="${TARGET_MARGIN_MEMORY_SAFE_BACKWARD:-${TRACE_ECG_MEMORY_SAFE_BACKWARD:-True}}"
+TARGET_MARGIN_CHUNK_BIND_ROWS_VALUE="${TARGET_MARGIN_CHUNK_BIND_ROWS:-${TRACE_ECG_MARGIN_CHUNK_BIND_ROWS:-2}}"
 
 cd "${GEM_ROOT}"
 conda run -n "${CONDA_ENV}" --no-capture-output torchrun \
   --nproc_per_node "${NPROC_PER_NODE}" \
   --master_addr "${MASTER_ADDR:-127.0.0.1}" \
   --node_rank 0 \
-  --master_port "${MASTER_PORT:-1275}" \
+  --master_port "${MASTER_PORT:-1277}" \
   --nnodes 1 \
   "${GEM_ROOT}/llava/train/train_mem.py" \
   --deepspeed "${GEM_ROOT}/scripts/zero2.json" \
@@ -115,8 +117,20 @@ conda run -n "${CONDA_ENV}" --no-capture-output torchrun \
   --data_path "${DATA_PATH}" \
   --grouped_triplet_training False \
   --layoutbind_enable False \
-  --anchor_ecg_enable False \
-  --targetmargin_enable False \
+  --anchor_ecg_enable True \
+  --anchor_ecg_rowwise True \
+  --anchor_ecg_lambda_margin "${TARGET_MARGIN_LAMBDA_VALUE}" \
+  --anchor_ecg_margin_delta "${TARGET_MARGIN_DELTA_VALUE}" \
+  --anchor_ecg_length_normalize True \
+  --anchor_ecg_strict_eligibility True \
+  --anchor_ecg_memory_safe_backward "${TARGET_MARGIN_MEMORY_SAFE_VALUE}" \
+  --anchor_ecg_margin_chunk_bind_rows "${TARGET_MARGIN_CHUNK_BIND_ROWS_VALUE}" \
+  --targetmargin_enable True \
+  --targetmargin_rowwise True \
+  --targetmargin_lambda "${TARGET_MARGIN_LAMBDA_VALUE}" \
+  --targetmargin_delta "${TARGET_MARGIN_DELTA_VALUE}" \
+  --targetmargin_length_normalize True \
+  --targetmargin_strict_eligibility True \
   --ecg_folder "${ECG_FOLDER}" \
   --ecg_tower "${ECG_TOWER}" \
   --open_clip_config coca_ViT-B-32 \
