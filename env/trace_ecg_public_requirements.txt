@@ -1,0 +1,8 @@
+# Lightweight dependencies for TRACE-ECG public scoring utilities.
+# Training still uses the patched GEM environment.
+numpy>=1.24
+pandas>=2.0
+scikit-learn>=1.3
+pyarrow>=14
+tqdm>=4.66
+jsonlines>=4.0.0

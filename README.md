@@ -69,6 +69,7 @@ rows.
 ```text
 configs/      Example path configuration
 docs/         Method, data, experiment, and metric documentation
+env/          Lightweight public scoring environment files
 scripts/      Public training and scoring entrypoints
 tools/        Standalone scoring utilities
 patches/      GEM patch and new files used by the experiments
@@ -78,14 +79,32 @@ reports/      Code inventory and release reports
 
 ## Quick Start
 
-1. Clone or prepare a compatible GEM checkout.
-2. Apply the GEM patch used by these experiments:
+1. Clone or prepare a compatible GEM checkout at the verified upstream commit:
+
+```bash
+bash scripts/prepare_gem_checkout.sh /path/to/GEM
+```
+
+The verified GEM commit is:
+
+```text
+c8a580faae819c57c008e94fa080f5d3c6881769
+```
+
+2. If you already have a clean GEM checkout at that commit, apply the GEM patch
+   directly:
 
 ```bash
 bash scripts/apply_gem_patch.sh /path/to/GEM
 ```
 
-3. Edit paths:
+3. Create a scoring-only environment, or use the patched GEM training env:
+
+```bash
+conda env create -f env/trace_ecg_eval_environment.yml
+```
+
+4. Edit paths:
 
 ```bash
 cp configs/paths.example.env paths.env
@@ -93,22 +112,23 @@ vim paths.env
 source paths.env
 ```
 
-4. Score a close-ended ECGBench-L3 triplet prediction file:
+5. Score a close-ended ECGBench-L3 triplet prediction file:
 
 ```bash
 bash scripts/score_ecgbench_l3_choice.sh \
   --predictions /path/to/predictions.jsonl \
-  --out_dir /path/to/output_dir
+  --run-name example_run \
+  --output-dir /path/to/output_dir
 ```
 
-5. Run a LoRA-SFT experimental condition:
+6. Run a LoRA-SFT experimental condition:
 
 ```bash
 USER_APPROVED_FULL_TRAIN=1 bash scripts/train_lora_sft_gemlike.sh \
   --full_train --setting l3 --frac 005
 ```
 
-6. Run the appendix-only Target-Margin diagnostic:
+7. Run the appendix-only Target-Margin diagnostic:
 
 ```bash
 USER_APPROVED_FULL_TRAIN=1 bash scripts/train_target_margin_triplet_lora.sh \

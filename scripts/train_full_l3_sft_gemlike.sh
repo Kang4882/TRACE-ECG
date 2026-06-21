@@ -13,6 +13,10 @@ EOF
 }
 
 MODE="${1:-}"
+if [[ "${MODE}" == "-h" || "${MODE}" == "--help" ]]; then
+  usage
+  exit 0
+fi
 if [[ "${MODE}" != "--preflight" && "${MODE}" != "--full_train" ]]; then
   usage
   exit 1
